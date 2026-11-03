@@ -10,9 +10,11 @@ import {
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import type * as Crypto from "effect/Crypto";
+import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 
@@ -121,6 +123,49 @@ export const seedDevReplayInstance = Effect.fn(
   });
 });
 
+export const FP_A2A_INSTANCE_ID = ProviderInstanceId.make("flightplanA2a");
+
+/**
+ * Fork (flightplan): the "A2A" provider. `T3CODE_FP_A2A_AGENT` names the ACP bridge script
+ * (integrations/flightplan-a2a/a2a-acp-agent.mjs), which answers prompts through A2A. Unset: no-op.
+ * The bridge is an ordinary local ACP command, so the stock ACP adapter does the rest.
+ */
+export const seedFlightplanA2aInstance = Effect.fn(
+  "ProviderInstanceRegistryHydration.seedFlightplanA2aInstance",
+)(function* () {
+  const agentPath = (yield* Config.String("T3CODE_FP_A2A_AGENT").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ))?.trim();
+  if (agentPath === undefined || agentPath.length === 0) return;
+  const fileSystem = yield* FileSystem.FileSystem;
+  if (!(yield* fileSystem.exists(agentPath))) {
+    return yield* Effect.logWarning("T3CODE_FP_A2A_AGENT points to a missing file", { agentPath });
+  }
+  const commandPath = yield* HostProcess.ExecutablePath;
+  const serverSettings = yield* Settings.ServerSettingsService;
+  const existing = (yield* serverSettings.getSettings).providerInstances[FP_A2A_INSTANCE_ID];
+  const existingConfig = existing?.config as Record<string, unknown> | undefined;
+  if (
+    existingConfig?.commandPath === commandPath &&
+    (existingConfig.commandArgs as ReadonlyArray<unknown> | undefined)?.[0] === agentPath
+  ) {
+    return;
+  }
+  // Keeps user edits, such as turning the provider off.
+  const instance: ProviderInstanceConfig = {
+    displayName: "Gandalf (A2A)",
+    ...existing,
+    driver: ProviderDriverKind.make("acpRegistry"),
+    config: { ...existingConfig, source: "local", commandPath, commandArgs: [agentPath] },
+  };
+  yield* serverSettings.updateProviderInstance({
+    operation: "upsert",
+    instanceId: FP_A2A_INSTANCE_ID,
+    instance,
+  });
+});
+
 const layerSettingsWatcher = (settingsChanges: Stream.Stream<ServerSettings>) =>
   Layer.effectDiscard(
     Effect.gen(function* () {
@@ -154,6 +199,9 @@ export const layer: Layer.Layer<
     const serverSettings = yield* Settings.ServerSettingsService;
     yield* seedDevReplayInstance().pipe(
       Effect.catchCause((cause) => Effect.logWarning("Dev replay agent unavailable", cause)),
+    );
+    yield* seedFlightplanA2aInstance().pipe(
+      Effect.catchCause((cause) => Effect.logWarning("A2A agent unavailable", cause)),
     );
     // Subscribe before the seed read so saves during registry construction are queued.
     const settingsChanges = yield* serverSettings.subscribeChanges;

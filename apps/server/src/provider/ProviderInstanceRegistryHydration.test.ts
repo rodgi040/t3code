@@ -7,6 +7,7 @@ import {
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it as effectIt } from "@effect/vitest";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { describe, expect, it } from "vite-plus/test";
@@ -16,7 +17,9 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import {
   DEV_REPLAY_INSTANCE_ID,
   deriveProviderInstanceConfigMap,
+  FP_A2A_INSTANCE_ID,
   seedDevReplayInstance,
+  seedFlightplanA2aInstance,
 } from "./ProviderInstanceRegistryHydration.ts";
 
 const projectId = ProjectId.make("project-a");
@@ -136,6 +139,41 @@ describe("seedDevReplayInstance", () => {
         expect(instance?.config).toMatchObject({
           source: "local",
           commandArgs: [expect.stringMatching(/scripts[/\\]dev-replay-agent\.ts$/)],
+        });
+      }),
+    ),
+  );
+});
+
+describe("seedFlightplanA2aInstance", () => {
+  const seed = (env: Record<string, string>) =>
+    Effect.gen(function* () {
+      yield* seedFlightplanA2aInstance().pipe(
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env }))),
+      );
+      const settings = yield* ServerSettingsService;
+      return (yield* settings.getSettings).providerInstances[FP_A2A_INSTANCE_ID];
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          ServerConfig.layerTest(process.cwd(), { prefix: "t3-fp-a2a-seed-" }),
+          ServerSettingsService.layerTest({}),
+        ).pipe(Layer.provideMerge(NodeServices.layer)),
+      ),
+    );
+
+  effectIt.effect("does nothing without T3CODE_FP_A2A_AGENT", () =>
+    seed({}).pipe(Effect.map((instance) => expect(instance).toBeUndefined())),
+  );
+
+  effectIt.effect("registers a local ACP instance for the bridge script", () =>
+    seed({ T3CODE_FP_A2A_AGENT: import.meta.filename }).pipe(
+      Effect.map((instance) => {
+        expect(instance?.displayName).toBe("Gandalf (A2A)");
+        expect(instance?.driver).toBe("acpRegistry");
+        expect(instance?.config).toMatchObject({
+          source: "local",
+          commandArgs: [import.meta.filename],
         });
       }),
     ),
