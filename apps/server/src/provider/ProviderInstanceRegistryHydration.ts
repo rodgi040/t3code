@@ -124,6 +124,7 @@ export const seedDevReplayInstance = Effect.fn(
 });
 
 export const FP_A2A_INSTANCE_ID = ProviderInstanceId.make("flightplanA2a");
+export const FP_AGENTSCOPE_INSTANCE_ID = ProviderInstanceId.make("flightplanAgentscope");
 
 /**
  * Fork (flightplan): the "A2A" provider. `T3CODE_FP_A2A_AGENT` names the ACP bridge script
@@ -166,6 +167,53 @@ export const seedFlightplanA2aInstance = Effect.fn(
   });
 });
 
+/**
+ * Fork (flightplan): second local ACP instance. Same bridge, peer `agentscope`
+ * on 127.0.0.1:9908. The instance environment is what the ACP driver puts on
+ * the child process (`FP_A2A_AGENTS`). The model stays in fake mode until the
+ * agent container is switched; this seed does not set that.
+ */
+export const seedFlightplanAgentscopeInstance = Effect.fn(
+  "ProviderInstanceRegistryHydration.seedFlightplanAgentscopeInstance",
+)(function* () {
+  const agentPath = (yield* Config.String("T3CODE_FP_A2A_AGENT").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ))?.trim();
+  if (agentPath === undefined || agentPath.length === 0) return;
+  const fileSystem = yield* FileSystem.FileSystem;
+  if (!(yield* fileSystem.exists(agentPath))) {
+    return yield* Effect.logWarning("T3CODE_FP_A2A_AGENT points to a missing file", { agentPath });
+  }
+  const commandPath = yield* HostProcess.ExecutablePath;
+  const serverSettings = yield* Settings.ServerSettingsService;
+  const existing = (yield* serverSettings.getSettings).providerInstances[FP_AGENTSCOPE_INSTANCE_ID];
+  const existingConfig = existing?.config as Record<string, unknown> | undefined;
+  const peer = existing?.environment?.find((entry) => entry.name === "FP_A2A_AGENTS")?.value;
+  if (
+    existingConfig?.commandPath === commandPath &&
+    (existingConfig.commandArgs as ReadonlyArray<unknown> | undefined)?.[0] === agentPath &&
+    peer === "agentscope"
+  ) {
+    return;
+  }
+  const instance: ProviderInstanceConfig = {
+    displayName: "AgentScope",
+    ...existing,
+    driver: ProviderDriverKind.make("acpRegistry"),
+    environment: [
+      { name: "FP_A2A_AGENTS", value: "agentscope", sensitive: false },
+      { name: "FP_A2A_LABELS", value: '{"agentscope":"AgentScope"}', sensitive: false },
+    ],
+    config: { ...existingConfig, source: "local", commandPath, commandArgs: [agentPath] },
+  };
+  yield* serverSettings.updateProviderInstance({
+    operation: "upsert",
+    instanceId: FP_AGENTSCOPE_INSTANCE_ID,
+    instance,
+  });
+});
+
 const layerSettingsWatcher = (settingsChanges: Stream.Stream<ServerSettings>) =>
   Layer.effectDiscard(
     Effect.gen(function* () {
@@ -202,6 +250,9 @@ export const layer: Layer.Layer<
     );
     yield* seedFlightplanA2aInstance().pipe(
       Effect.catchCause((cause) => Effect.logWarning("A2A agent unavailable", cause)),
+    );
+    yield* seedFlightplanAgentscopeInstance().pipe(
+      Effect.catchCause((cause) => Effect.logWarning("AgentScope agent unavailable", cause)),
     );
     // Subscribe before the seed read so saves during registry construction are queued.
     const settingsChanges = yield* serverSettings.subscribeChanges;

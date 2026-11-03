@@ -313,6 +313,7 @@ import { useRightPanelSurfaceClose } from "../hooks/useRightPanelSurfaceClose";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { modelFallbackBannerItem } from "./chat/ComposerUsageLimits";
 import { ComposerSurface } from "./chat/ComposerSurface";
+import { FlightplanComposer } from "../flightplan/FlightplanComposer";
 import { resolveThreadSyncPhase } from "../threadSync";
 import {
   hasAvailableCompactionProvider,
@@ -3554,6 +3555,20 @@ export default function ChatView(props: ChatViewProps) {
                         : undefined
                     }
                   >
+                    <FlightplanComposer
+                      activeInstanceId={activeProviderInstanceId}
+                      entries={providerInstanceEntries}
+                      tokens={
+                        activeContextWindow
+                          ? {
+                              inputTokens: activeContextWindow.inputTokens,
+                              outputTokens: activeContextWindow.outputTokens,
+                              cost: activeContextWindow.cost,
+                            }
+                          : null
+                      }
+                      onSelect={onProviderModelSelectStable}
+                    />
                     <ComposerSurface.Shell contextRow={showComposerContextStrip}>
                       <ComposerSurface.Host
                         inert={queuedRunEdit.isSaving}

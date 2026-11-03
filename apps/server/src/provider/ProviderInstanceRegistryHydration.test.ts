@@ -20,6 +20,8 @@ import {
   FP_A2A_INSTANCE_ID,
   seedDevReplayInstance,
   seedFlightplanA2aInstance,
+  seedFlightplanAgentscopeInstance,
+  FP_AGENTSCOPE_INSTANCE_ID,
 } from "./ProviderInstanceRegistryHydration.ts";
 
 const projectId = ProjectId.make("project-a");
@@ -175,6 +177,37 @@ describe("seedFlightplanA2aInstance", () => {
           source: "local",
           commandArgs: [import.meta.filename],
         });
+      }),
+    ),
+  );
+});
+
+describe("seedFlightplanAgentscopeInstance", () => {
+  const seed = (env: Record<string, string>) =>
+    Effect.gen(function* () {
+      yield* seedFlightplanAgentscopeInstance().pipe(
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env }))),
+      );
+      const settings = yield* ServerSettingsService;
+      return (yield* settings.getSettings).providerInstances[FP_AGENTSCOPE_INSTANCE_ID];
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          ServerConfig.layerTest(process.cwd(), { prefix: "t3-fp-agentscope-seed-" }),
+          ServerSettingsService.layerTest({}),
+        ).pipe(Layer.provideMerge(NodeServices.layer)),
+      ),
+    );
+
+  effectIt.effect("registers a second ACP instance for the agentscope peer", () =>
+    seed({ T3CODE_FP_A2A_AGENT: import.meta.filename }).pipe(
+      Effect.map((instance) => {
+        expect(instance?.displayName).toBe("AgentScope");
+        expect(instance?.environment).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ name: "FP_A2A_AGENTS", value: "agentscope" }),
+          ]),
+        );
       }),
     ),
   );
