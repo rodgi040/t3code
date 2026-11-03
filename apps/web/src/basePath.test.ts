@@ -25,6 +25,16 @@ describe("basePath", () => {
     expect(withBasePath("ws://op.test:8090/ws", origin)).toBe("ws://op.test:8090/chat/ws");
   });
 
+  it("keeps the OpenProject API unprefixed", async () => {
+    const { withBasePath } = await load("/chat");
+    const origin = "http://op.test:8090";
+    expect(withBasePath("/api/v3/work_packages?x=1", origin)).toBe("/api/v3/work_packages?x=1");
+    expect(withBasePath("http://op.test:8090/api/v3/projects", origin)).toBe(
+      "http://op.test:8090/api/v3/projects",
+    );
+    expect(withBasePath("/api/auth/session", origin)).toBe("/chat/api/auth/session");
+  });
+
   it("does not touch other origins, relative paths, or protocol-relative URLs", async () => {
     const { withBasePath } = await load("/chat");
     const origin = "http://op.test:8090";

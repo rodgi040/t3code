@@ -11,6 +11,21 @@ function normalizeBasePath(base: string): string {
 /** "" for the root build, otherwise "/chat" style (leading slash, no trailing slash). */
 export const BASE_PATH: string = normalizeBasePath(import.meta.env.BASE_URL ?? "/");
 
+/**
+ * Same-origin paths that must stay unprefixed, for example OpenProject's API (`/api/v3/`).
+ * Build-time list, comma separated: VITE_T3CODE_BASE_PATH_EXCLUDE (default "/api/v3/").
+ */
+const EXCLUDED_PREFIXES: ReadonlyArray<string> = (
+  import.meta.env.VITE_T3CODE_BASE_PATH_EXCLUDE ?? "/api/v3/"
+)
+  .split(",")
+  .map((entry: string) => entry.trim())
+  .filter((entry: string) => entry.startsWith("/"));
+
+function isExcluded(pathname: string): boolean {
+  return EXCLUDED_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+}
+
 function hasPrefix(pathname: string): boolean {
   return pathname === BASE_PATH || pathname.startsWith(`${BASE_PATH}/`);
 }
@@ -22,7 +37,8 @@ export function withBasePath(
 ): string {
   if (BASE_PATH === "") return input;
   if (input.startsWith("/") && !input.startsWith("//")) {
-    return hasPrefix(input.split(/[?#]/, 1)[0] ?? input) ? input : `${BASE_PATH}${input}`;
+    const path = input.split(/[?#]/, 1)[0] ?? input;
+    return hasPrefix(path) || isExcluded(path) ? input : `${BASE_PATH}${input}`;
   }
   let url: URL;
   try {
@@ -32,7 +48,8 @@ export function withBasePath(
   }
   const sameHost = url.host === new URL(origin).host;
   const knownScheme = /^(https?|wss?):$/.test(url.protocol);
-  if (!sameHost || !knownScheme || hasPrefix(url.pathname)) return input;
+  if (!sameHost || !knownScheme || hasPrefix(url.pathname) || isExcluded(url.pathname))
+    return input;
   url.pathname = `${BASE_PATH}${url.pathname}`;
   return url.toString();
 }

@@ -14,6 +14,7 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { StandalonePage, StandalonePageHeader } from "../ui/standalone-page";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { BASE_PATH } from "../../basePath";
 
 export function PairingPendingSurface() {
   return (
@@ -245,7 +246,11 @@ export function HostedPairingRouteSurface() {
           </Button>
         ) : null}
         {status === "paired" ? (
-          <Button size="sm" variant="outline" onClick={() => (window.location.href = "/")}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => (window.location.href = `${BASE_PATH}/`)}
+          >
             Open app
           </Button>
         ) : null}
