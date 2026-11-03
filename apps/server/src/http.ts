@@ -253,6 +253,24 @@ export const layerHttpCompression = HttpRouter.middleware(HttpMiddleware.compres
   global: true,
 });
 
+/**
+ * Fork (flightplan): the app may be framed by pages of its own origin only (OpenProject embeds it
+ * at /chat behind the same reverse proxy). Responses that already carry a framing policy, such as
+ * the Codex callback page, keep theirs.
+ */
+const frameSelfOnly = <E, R>(httpApp: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>) =>
+  Effect.map(httpApp, (response) => {
+    const names = new Set(Object.keys(response.headers).map((name) => name.toLowerCase()));
+    return HttpServerResponse.setHeaders(response, {
+      ...(names.has("x-frame-options") ? {} : { "x-frame-options": "SAMEORIGIN" }),
+      ...(names.has("content-security-policy")
+        ? {}
+        : { "content-security-policy": "frame-ancestors 'self'" }),
+    });
+  });
+
+export const layerFrameSelfOnly = HttpRouter.middleware(frameSelfOnly, { global: true });
+
 export const layerBrowserApiCors = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;

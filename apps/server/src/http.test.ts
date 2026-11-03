@@ -207,9 +207,10 @@ const layerFileResponse = Layer.mergeAll(NodeHttpPlatform.layer, NodeServices.la
 const makeStaticRequest = Effect.fn("HttpTest.makeStaticRequest")(function* (staticDir: string) {
   const config = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
-  const layerApp = Layer.merge(
+  const layerApp = Layer.mergeAll(
     ServerHttp.layerStaticAndDevRoute,
     ServerHttp.layerHttpCompression,
+    ServerHttp.layerFrameSelfOnly,
   ).pipe(Layer.provideMerge(NodeHttpPlatform.layer));
   // HttpRouter.serve prefers outer services; inject the test FileSystem between it and NodeHttpServer.layerTest.
   const services = yield* Layer.build(
@@ -229,6 +230,22 @@ it.layer(
     Layer.provideMerge(NodeServices.layer),
   ),
 )("static HTTP responses", (it) => {
+  it.effect("allows framing by the same origin only", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-static-frame-" });
+      yield* fs.writeFileString(path.join(staticDir, "index.html"), "<!doctype html><p>app</p>");
+      const request = yield* makeStaticRequest(staticDir);
+      for (const resource of ["/", "/missing-route"]) {
+        const response = yield* request(resource);
+        expect(response.status).toBe(200);
+        expect(response.headers["x-frame-options"]).toBe("SAMEORIGIN");
+        expect(response.headers["content-security-policy"]).toBe("frame-ancestors 'self'");
+      }
+    }),
+  );
+
   it.effect("revalidates non-HTML files and returns changed contents", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
