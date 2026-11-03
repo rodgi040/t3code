@@ -55,6 +55,7 @@ import {
   isWildcardHost,
   issueHeadlessServeAccessInfo,
 } from "./startupAccess.ts";
+import { flightplanConfig } from "./flightplanConfig.ts";
 
 export class ServerRuntimeStartupError extends Schema.TaggedError<ServerRuntimeStartupError>()(
   "ServerRuntimeStartupError",
@@ -612,7 +613,11 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
           }),
           Effect.ignoreCause({ log: true }),
         );
-        if (serverConfig.startupPresentation === "headless") {
+        if ((yield* flightplanConfig.pipe(Effect.orDie)).suppressStartupPairing) {
+          yield* Effect.logInfo(
+            "Startup pairing link suppressed (T3CODE_SUPPRESS_STARTUP_PAIRING); use `t3 auth pairing create`.",
+          );
+        } else if (serverConfig.startupPresentation === "headless") {
           yield* Effect.logDebug("startup phase: headless access info");
           const accessInfo = yield* issueHeadlessServeAccessInfo();
           yield* runStartupPhase(

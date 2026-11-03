@@ -12,7 +12,6 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import * as Config from "effect/Config";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
@@ -30,6 +29,7 @@ import {
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import { OtlpTracer, OtlpSerialization } from "effect/observability";
 
+import { flightplanConfig, isDisabledPath } from "./flightplanConfig.ts";
 import * as ServerConfig from "./config.ts";
 import { ASSET_ROUTE_PREFIX, readMcpAppHtml, resolveAsset } from "./assets/AssetAccess.ts";
 import { sourceControlMediaResponse } from "./assets/sourceControlMediaResponse.ts";
@@ -280,21 +280,22 @@ export const stripBasePath = (url: string, basePath: string): string | undefined
 
 /**
  * Fork (flightplan): `T3CODE_BASE_PATH=/chat` makes the server accept `/chat/...` itself, so it works
- * behind a proxy that keeps or strips the prefix. Unprefixed URLs still work. Unset: no-op.
+ * behind a proxy that keeps or strips the prefix. Unprefixed URLs still work.
+ * `T3CODE_DISABLE_SURFACES=guest,mcp,oauth` answers those routes with 404, matched on the canonical
+ * path so "//mcp", "/%6dcp" and "/MCP" cannot slip past the router.
  */
-export const layerBasePath = Layer.unwrap(
+export const layerRequestGate = Layer.unwrap(
   Effect.gen(function* () {
-    const raw = (yield* Config.String("T3CODE_BASE_PATH").pipe(
-      Config.option,
-      Config.map(Option.getOrUndefined),
-    ))?.trim();
-    const trimmed = raw?.replace(/^\/+|\/+$/g, "") ?? "";
-    if (trimmed.length === 0) return Layer.empty;
-    const basePath = `/${trimmed}`;
+    const config = yield* flightplanConfig;
+    if (config.basePath === "" && config.disabledPrefixes.length === 0) return Layer.empty;
     return HttpRouter.middleware(
       <E, R>(httpApp: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>) =>
         Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) => {
-          const rest = stripBasePath(request.url, basePath);
+          const rest =
+            config.basePath === "" ? undefined : stripBasePath(request.url, config.basePath);
+          if (isDisabledPath(rest ?? request.url, config.disabledPrefixes)) {
+            return Effect.succeed(HttpServerResponse.text("Not Found", { status: 404 }));
+          }
           return rest === undefined
             ? httpApp
             : Effect.provideService(

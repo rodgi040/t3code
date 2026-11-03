@@ -6,6 +6,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -204,13 +205,24 @@ describe("untraced requests", () => {
 
 const layerFileResponse = Layer.mergeAll(NodeHttpPlatform.layer, NodeServices.layer);
 
-const makeStaticRequest = Effect.fn("HttpTest.makeStaticRequest")(function* (staticDir: string) {
+const makeStaticRequest = Effect.fn("HttpTest.makeStaticRequest")(function* (
+  staticDir: string,
+  env: Record<string, string> = {},
+) {
   const config = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   const layerApp = Layer.mergeAll(
     ServerHttp.layerStaticAndDevRoute,
     ServerHttp.layerHttpCompression,
     ServerHttp.layerFrameSelfOnly,
+    ServerHttp.layerRequestGate.pipe(
+      Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env }))),
+    ),
+    // Stand-ins for the real MCP, OAuth and guest routes, which need the whole server to build.
+    HttpRouter.add("GET", "/mcp", Effect.succeed(HttpServerResponse.text("mcp"))),
+    HttpRouter.add("GET", "/oauth/token", Effect.succeed(HttpServerResponse.text("oauth"))),
+    HttpRouter.add("GET", "/api/guest/x", Effect.succeed(HttpServerResponse.text("guest"))),
+    HttpRouter.add("GET", "/api/ping", Effect.succeed(HttpServerResponse.text("pong"))),
   ).pipe(Layer.provideMerge(NodeHttpPlatform.layer));
   // HttpRouter.serve prefers outer services; inject the test FileSystem between it and NodeHttpServer.layerTest.
   const services = yield* Layer.build(
@@ -244,6 +256,62 @@ it.layer(
     Layer.provideMerge(NodeServices.layer),
   ),
 )("static HTTP responses", (it) => {
+  it.effect("serves the real static route and API with and without the base path", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-base-path-" });
+      yield* fs.writeFileString(path.join(staticDir, "index.html"), "<!doctype html><p>app</p>");
+      yield* fs.writeFileString(path.join(staticDir, "app.js"), "export const x = 1;");
+      const prefixed = yield* makeStaticRequest(staticDir, { T3CODE_BASE_PATH: "/chat" });
+      for (const [resource, body] of [
+        ["/chat/", "app"],
+        ["/chat", "app"],
+        ["/chat/app.js", "export const x"],
+        ["/chat/api/ping", "pong"],
+        ["/api/ping", "pong"],
+        ["/app.js", "export const x"],
+      ] as const) {
+        const response = yield* prefixed(resource);
+        expect(response.status, resource).toBe(200);
+        expect(yield* response.text, resource).toContain(body);
+      }
+      const plain = yield* makeStaticRequest(staticDir);
+      expect(yield* (yield* plain("/")).text).toContain("app");
+      expect(yield* (yield* plain("/mcp")).text).toBe("mcp");
+    }),
+  );
+
+  it.effect("answers disabled surfaces with 404, including the bypass spellings", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-gate-" });
+      yield* fs.writeFileString(path.join(staticDir, "index.html"), "<!doctype html><p>app</p>");
+      const gated = yield* makeStaticRequest(staticDir, {
+        T3CODE_BASE_PATH: "/chat",
+        T3CODE_DISABLE_SURFACES: "guest,mcp,oauth",
+      });
+      for (const resource of [
+        "/chat/mcp",
+        "/chat//mcp",
+        "/chat/%6dcp",
+        "/chat/MCP",
+        "/mcp",
+        "//mcp",
+        "/chat/oauth/token",
+        "/chat/api/guest/x",
+        "/api/guest/x",
+      ]) {
+        const response = yield* gated(resource);
+        expect(response.status, resource).toBe(404);
+        expect(yield* response.text, resource).not.toMatch(/^(mcp|oauth|guest)$/);
+      }
+      expect((yield* gated("/chat/api/ping")).status).toBe(200);
+      expect((yield* gated("/chat/")).status).toBe(200);
+    }),
+  );
+
   it.effect("allows framing by the same origin only", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

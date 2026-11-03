@@ -10,6 +10,7 @@ import * as NetAddress from "effect/net/NetAddress";
 
 import * as ServerConfig from "./config.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+import { pairPathFor } from "./flightplanConfig.ts";
 
 export interface HeadlessServeAccessInfo {
   readonly connectionString: string;
@@ -153,7 +154,7 @@ const resolveListeningPort = (address: unknown, fallbackPort: number): number =>
 
 export const buildPairingUrl = (connectionString: string, token: string): string => {
   const url = new URL(connectionString);
-  url.pathname = "/pair";
+  url.pathname = pairPathFor(url, process.env.T3CODE_BASE_PATH);
   url.searchParams.delete("token");
   url.hash = new URLSearchParams([["token", token]]).toString();
   return url.toString();

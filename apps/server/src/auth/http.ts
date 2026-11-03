@@ -28,6 +28,7 @@ import * as Layer from "effect/Layer";
 import * as Cookies from "effect/http/Cookies";
 import * as HttpEffect from "effect/http/HttpEffect";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
+import { flightplanConfig, isSecureRequest } from "../flightplanConfig.ts";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
@@ -54,7 +55,7 @@ const appendDpopChallengeOnUnauthorized =
   Effect.fnUntraced(function* (error: EnvironmentAuthInvalidError) {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const usesDpop =
-      (request.originalUrl.startsWith("/oauth/token") && request.headers.dpop !== undefined) ||
+      (request.url.startsWith("/oauth/token") && request.headers.dpop !== undefined) ||
       request.headers.authorization?.startsWith("DPoP ") === true;
     if (usesDpop) {
       yield* appendDpopChallengeHeader;
@@ -197,22 +198,39 @@ export const failEnvironmentInternal =
     return yield* new EnvironmentInternalError({ code: "internal_error", reason, traceId });
   });
 
-const appendSessionCookie = (cookieName: string, token: string, expiresAt: DateTime.DateTime) =>
-  Effect.fromResult(
+/** Fork: cookie path follows T3CODE_BASE_PATH; Secure when the request came over HTTPS (also via a proxy). */
+const sessionCookieOptions = Effect.gen(function* () {
+  const config = yield* flightplanConfig.pipe(Effect.orDie);
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  return {
+    httpOnly: true,
+    path: config.basePath === "" ? "/" : config.basePath,
+    sameSite: "lax" as const,
+    ...(isSecureRequest({
+      forwardedProto: request.headers["x-forwarded-proto"],
+      url: request.originalUrl,
+    })
+      ? { secure: true }
+      : {}),
+  };
+});
+
+const appendSessionCookie = Effect.fn("appendSessionCookie")(function* (
+  cookieName: string,
+  token: string,
+  expiresAt: DateTime.DateTime,
+) {
+  const options = yield* sessionCookieOptions;
+  const cookies = yield* Effect.fromResult(
     Cookies.set(Cookies.empty, cookieName, token, {
       expires: DateTime.toDate(expiresAt),
-      httpOnly: true,
-      path: "/",
-      sameSite: "lax",
+      ...options,
     }),
-  ).pipe(
-    Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")),
-    Effect.flatMap((cookies) =>
-      HttpEffect.appendPreResponseHandler((_request, response) =>
-        Effect.succeed(HttpServerResponse.mergeCookies(response, cookies)),
-      ),
-    ),
+  ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")));
+  yield* HttpEffect.appendPreResponseHandler((_request, response) =>
+    Effect.succeed(HttpServerResponse.mergeCookies(response, cookies)),
   );
+});
 
 export const requireEnvironmentScope = Effect.fn("environment.auth.requireScope")(function* (
   scope: AuthEnvironmentScope,
@@ -313,21 +331,16 @@ export const layer = HttpApiBuilder.group(
                 : undefined,
             );
             const cookieName = result.cookieName ?? sessions.cookieName;
+            const cookieOptions = yield* sessionCookieOptions;
             const selectedCookie = yield* Effect.fromResult(
               Cookies.set(Cookies.empty, cookieName, result.sessionToken, {
                 expires: DateTime.toDate(result.response.expiresAt),
-                httpOnly: true,
-                path: "/",
-                sameSite: "lax",
+                ...cookieOptions,
               }),
             ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")));
             const sessionCookies = result.expireNormalCookie
               ? yield* Effect.fromResult(
-                  Cookies.expireCookie(selectedCookie, sessions.cookieName, {
-                    httpOnly: true,
-                    path: "/",
-                    sameSite: "lax",
-                  }),
+                  Cookies.expireCookie(selectedCookie, sessions.cookieName, cookieOptions),
                 ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")))
               : selectedCookie;
 

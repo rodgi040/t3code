@@ -259,6 +259,7 @@ import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
 import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
+import { flightplanConfig, isOriginAllowed } from "./flightplanConfig.ts";
 import { isNetworkPath } from "@t3tools/shared/path";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import { isTelemetryIdHash } from "@t3tools/shared/telemetryId";
@@ -3312,6 +3313,22 @@ export const layer = Layer.unwrap(
             failEnvironmentInternal("internal_error", error),
           ),
         );
+        // Fork: a cookie rides along on cross-site upgrades, so the Origin must be the own or a configured one.
+        if (session.method === "browser-session-cookie") {
+          const fpConfig = yield* flightplanConfig.pipe(Effect.orDie);
+          if (
+            !isOriginAllowed({
+              origin: request.headers.origin,
+              host: request.headers.host,
+              allowedOrigins: fpConfig.allowedOrigins,
+            })
+          ) {
+            return HttpServerResponse.jsonUnsafe(
+              { code: "origin_not_allowed", message: "WebSocket origin is not allowed." },
+              { status: 403 },
+            );
+          }
+        }
         const clientAnalyticsProps = readClientAnalyticsProps(request);
         yield* analytics.recordOwners(readClientOwners(request), "client");
         const reportProfiles = yield* serverBrowser.profileReporter;
