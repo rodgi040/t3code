@@ -225,6 +225,20 @@ const makeStaticRequest = Effect.fn("HttpTest.makeStaticRequest")(function* (sta
     client.execute(HttpClientRequest.make(options?.method ?? "GET")(resource, options));
 });
 
+describe("stripBasePath", () => {
+  it("strips the base and keeps the query", () => {
+    expect(ServerHttp.stripBasePath("/chat", "/chat")).toBe("/");
+    expect(ServerHttp.stripBasePath("/chat/", "/chat")).toBe("/");
+    expect(ServerHttp.stripBasePath("/chat/api/x?a=1", "/chat")).toBe("/api/x?a=1");
+    expect(ServerHttp.stripBasePath("/chat?a=1", "/chat")).toBe("/?a=1");
+  });
+
+  it("leaves other URLs alone", () => {
+    expect(ServerHttp.stripBasePath("/api/x", "/chat")).toBeUndefined();
+    expect(ServerHttp.stripBasePath("/chatter/x", "/chat")).toBeUndefined();
+  });
+});
+
 it.layer(
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-static-http-test-" }).pipe(
     Layer.provideMerge(NodeServices.layer),

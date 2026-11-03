@@ -12,6 +12,7 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Config from "effect/Config";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
@@ -268,6 +269,44 @@ const frameSelfOnly = <E, R>(httpApp: Effect.Effect<HttpServerResponse.HttpServe
         : { "content-security-policy": "frame-ancestors 'self'" }),
     });
   });
+
+/** "/chat/x?y" with base "/chat" gives "/x?y"; undefined when the URL is outside the base. */
+export const stripBasePath = (url: string, basePath: string): string | undefined => {
+  if (url === basePath) return "/";
+  if (!url.startsWith(basePath)) return undefined;
+  const rest = url.slice(basePath.length);
+  return rest.startsWith("/") ? rest : rest.startsWith("?") ? `/${rest}` : undefined;
+};
+
+/**
+ * Fork (flightplan): `T3CODE_BASE_PATH=/chat` makes the server accept `/chat/...` itself, so it works
+ * behind a proxy that keeps or strips the prefix. Unprefixed URLs still work. Unset: no-op.
+ */
+export const layerBasePath = Layer.unwrap(
+  Effect.gen(function* () {
+    const raw = (yield* Config.String("T3CODE_BASE_PATH").pipe(
+      Config.option,
+      Config.map(Option.getOrUndefined),
+    ))?.trim();
+    const trimmed = raw?.replace(/^\/+|\/+$/g, "") ?? "";
+    if (trimmed.length === 0) return Layer.empty;
+    const basePath = `/${trimmed}`;
+    return HttpRouter.middleware(
+      <E, R>(httpApp: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>) =>
+        Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) => {
+          const rest = stripBasePath(request.url, basePath);
+          return rest === undefined
+            ? httpApp
+            : Effect.provideService(
+                httpApp,
+                HttpServerRequest.HttpServerRequest,
+                request.modify({ url: rest }),
+              );
+        }),
+      { global: true },
+    );
+  }),
+);
 
 export const layerFrameSelfOnly = HttpRouter.middleware(frameSelfOnly, { global: true });
 

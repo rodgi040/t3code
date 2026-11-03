@@ -777,6 +777,7 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(ServerHttp.layerBrowserApiCors),
   Layer.provide(ServerHttp.layerHttpCompression),
   Layer.provide(ServerHttp.layerFrameSelfOnly),
+  Layer.provide(ServerHttp.layerBasePath),
 );
 
 const layerMakeServer = Layer.unwrap(
