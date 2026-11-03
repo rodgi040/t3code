@@ -1,3 +1,5 @@
+// Fork (flightplan): first import on purpose, the shim must run before any request is issued.
+import "./basePath";
 import React from "react";
 import ReactDOM from "react-dom/client";
 

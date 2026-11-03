@@ -1,5 +1,6 @@
 import { createRouter, RouterHistory } from "@tanstack/react-router";
 
+import { BASE_PATH } from "./basePath";
 import { routeTree } from "./routeTree.gen";
 
 export function getRouter(history: RouterHistory) {
@@ -8,6 +9,7 @@ export function getRouter(history: RouterHistory) {
     history,
     context: {},
     defaultPreload: "intent",
+    ...(BASE_PATH === "" ? {} : { basepath: BASE_PATH }),
   });
 }
 

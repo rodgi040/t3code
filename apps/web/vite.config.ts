@@ -253,8 +253,17 @@ const configuredAllowedHosts = (process.env.T3CODE_DEV_ALLOWED_HOSTS ?? "")
   .filter((entry) => entry.length > 0);
 const allowedHosts = [".ts.net", ...configuredAllowedHosts];
 
+// Fork (flightplan): serve the build under a path prefix such as "/chat/" behind a reverse proxy
+// that strips the prefix. Unset keeps the upstream root build. See openproject/chat/README.md.
+const webBasePath = (() => {
+  const raw = process.env.T3CODE_WEB_BASE_PATH?.trim();
+  if (!raw || raw === "/") return "/";
+  return `/${raw.replace(/^\/+|\/+$/g, "")}/`;
+})();
+
 export default defineConfig(() => {
   return {
+    base: webBasePath,
     run: {
       tasks: {
         // tsc (tsc-rs) rewrites the tsbuildinfo it reads, which keeps a task out of the cache.
