@@ -2146,6 +2146,7 @@ const make = Effect.gen(function* () {
         const file = yield* secretRequests
           .savePasted({
             threadId,
+            requestNamespace: scope.requestNamespace,
             requestKey: yield* requestKey(input.clientRequestId),
             value: input.value,
           })
