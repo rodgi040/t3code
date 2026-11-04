@@ -16,10 +16,6 @@ export function ticketIdFromEmbedPath(pathname: string): string | null {
 
 export function setFlightplanEmbed(on: boolean): void {
   embedOn = on;
-  if (typeof document !== "undefined") {
-    if (on) document.documentElement.dataset.fpEmbed = "1";
-    else delete document.documentElement.dataset.fpEmbed;
-  }
   for (const listener of listeners) listener();
 }
 
