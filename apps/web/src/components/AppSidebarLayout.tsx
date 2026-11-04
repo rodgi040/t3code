@@ -415,11 +415,12 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const embed =
     useSyncExternalStore(subscribeFlightplanEmbed, flightplanEmbedOn, () => false) ||
     isEmbedLocation(pathname, search);
+  const embedKey = embed ? `${pathname}${search}` : "";
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mirrors the embed flag onto the document element so the stylesheet can hide the sidebar
   useEffect(() => {
-    if (embed) document.documentElement.dataset.fpEmbed = "1";
+    if (embedKey) document.documentElement.dataset.fpEmbed = "1";
     else delete document.documentElement.dataset.fpEmbed;
-  }, [embed]);
+  }, [embedKey]);
   const panelAnimationsSuppressed = usePanelNavigationSuppression(pathname);
   const routePanelAnimationsActive = panelAnimationsActive && !panelAnimationsSuppressed;
   const isMacosDesktop = isElectron && isMacPlatform(navigator.platform);
