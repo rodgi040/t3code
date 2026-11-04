@@ -111,3 +111,19 @@ export const pairPathFor = (baseUrl: URL, envBasePath: string | undefined): stri
   const fromUrl = normalizeBasePath(baseUrl.pathname);
   return `${fromUrl === "" ? normalizeBasePath(envBasePath ?? "") : fromUrl}/pair`;
 };
+
+/**
+ * Ticket-thread endpoint gate. PUT needs an allowed Origin. GET may omit it (browsers send no Origin on
+ * same-origin GET) but then Sec-Fetch-Site must be same-origin or absent; a present Origin must be allowed.
+ */
+export const isTicketRequestAllowed = (input: {
+  readonly method: string;
+  readonly origin: string | undefined;
+  readonly host: string | undefined;
+  readonly allowedOrigins: ReadonlyArray<string>;
+  readonly secFetchSite: string | undefined;
+}): boolean => {
+  const hasOrigin = input.origin !== undefined && input.origin.length > 0;
+  if (hasOrigin || input.method !== "GET") return isOriginAllowed(input);
+  return input.secFetchSite === undefined || input.secFetchSite.toLowerCase() === "same-origin";
+};

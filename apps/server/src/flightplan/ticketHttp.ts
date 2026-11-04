@@ -6,7 +6,7 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { AuthOrchestrationOperateScope, AuthOrchestrationReadScope } from "@t3tools/contracts";
 
 import * as ServerConfig from "../config.ts";
-import { flightplanConfig, isOriginAllowed } from "../flightplanConfig.ts";
+import { flightplanConfig, isTicketRequestAllowed } from "../flightplanConfig.ts";
 import { authenticateRawRouteWithScope } from "../http.ts";
 import {
   claimTicketThread,
@@ -39,9 +39,11 @@ const handle = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
   const config = yield* ServerConfig.ServerConfig;
   const fp = yield* flightplanConfig;
-  // Origin is mandatory (the proxy sets it); a missing or foreign origin is rejected.
+  // PUT: allowed Origin mandatory. GET: Origin optional (same-origin fetch), but if set it must be allowed.
   if (
-    !isOriginAllowed({
+    !isTicketRequestAllowed({
+      method: request.method,
+      secFetchSite: request.headers["sec-fetch-site"],
       origin: request.headers.origin,
       host: request.headers.host,
       allowedOrigins: fp.allowedOrigins,

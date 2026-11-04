@@ -4,6 +4,7 @@ import {
   canonicalRequestPath,
   isDisabledPath,
   isOriginAllowed,
+  isTicketRequestAllowed,
   isSecureRequest,
   pairPathFor,
 } from "./flightplanConfig.ts";
@@ -66,5 +67,43 @@ describe("pairPathFor", () => {
     expect(pairPathFor(new URL("http://h:1"), undefined)).toBe("/pair");
     expect(pairPathFor(new URL("http://h:1"), "/chat/")).toBe("/chat/pair");
     expect(pairPathFor(new URL("http://h:1/chat/"), undefined)).toBe("/chat/pair");
+  });
+});
+
+describe("isTicketRequestAllowed", () => {
+  const base = {
+    host: "127.0.0.1:3774",
+    allowedOrigins: ["http://localhost:8092"],
+    secFetchSite: undefined,
+  };
+  it("lets a same-origin GET without Origin through", () => {
+    expect(isTicketRequestAllowed({ ...base, method: "GET", origin: undefined })).toBe(true);
+    expect(
+      isTicketRequestAllowed({
+        ...base,
+        method: "GET",
+        origin: undefined,
+        secFetchSite: "same-origin",
+      }),
+    ).toBe(true);
+  });
+  it("rejects a cross-site GET without Origin and any foreign Origin", () => {
+    expect(
+      isTicketRequestAllowed({
+        ...base,
+        method: "GET",
+        origin: undefined,
+        secFetchSite: "cross-site",
+      }),
+    ).toBe(false);
+    expect(isTicketRequestAllowed({ ...base, method: "GET", origin: "http://evil.example" })).toBe(
+      false,
+    );
+  });
+  it("requires an allowed Origin for PUT", () => {
+    expect(isTicketRequestAllowed({ ...base, method: "PUT", origin: undefined })).toBe(false);
+    expect(
+      isTicketRequestAllowed({ ...base, method: "PUT", origin: "http://localhost:8092" }),
+    ).toBe(true);
   });
 });
