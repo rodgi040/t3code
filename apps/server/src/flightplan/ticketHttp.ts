@@ -3,17 +3,19 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 
+import { AuthOrchestrationOperateScope, AuthOrchestrationReadScope } from "@t3tools/contracts";
+
 import * as ServerConfig from "../config.ts";
+import { flightplanConfig, isOriginAllowed } from "../flightplanConfig.ts";
+import { authenticateRawRouteWithScope } from "../http.ts";
 import {
   claimTicketThread,
   readTicketThreadMap,
+  parseTicketThreadDraft,
   ticketIdFromPath,
   ticketThreadFile,
   writeTicketThreadMap,
-  type TicketThreadRecord,
 } from "./ticketThreads.ts";
-
-const CHAT_ORIGIN = "http://localhost:8092";
 
 let pending: Promise<void> = Promise.resolve();
 
@@ -33,24 +35,24 @@ function json(body: unknown, status = 200) {
   });
 }
 
-function asRecord(value: unknown): TicketThreadRecord | null {
-  if (value === null || typeof value !== "object") return null;
-  const row = value as Partial<TicketThreadRecord>;
-  if (!row.threadId || !row.environmentId || !row.projectId) return null;
-  return {
-    threadId: String(row.threadId),
-    environmentId: String(row.environmentId),
-    projectId: String(row.projectId),
-  };
-}
-
 const handle = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
   const config = yield* ServerConfig.ServerConfig;
-  const origin = request.headers.origin;
-  if (typeof origin === "string" && origin.length > 0 && origin !== CHAT_ORIGIN) {
+  const fp = yield* flightplanConfig;
+  // Origin is mandatory (the proxy sets it); a missing or foreign origin is rejected.
+  if (
+    !isOriginAllowed({
+      origin: request.headers.origin,
+      host: request.headers.host,
+      allowedOrigins: fp.allowedOrigins,
+    })
+  ) {
     return HttpServerResponse.text("Forbidden", { status: 403 });
   }
+  // Session cookie required: read scope for GET, operate scope for PUT.
+  yield* authenticateRawRouteWithScope(
+    request.method === "PUT" ? AuthOrchestrationOperateScope : AuthOrchestrationReadScope,
+  );
   const url = HttpServerRequest.toURL(request);
   if (Option.isNone(url)) return HttpServerResponse.text("Bad Request", { status: 400 });
   const ticketId = ticketIdFromPath(url.value.pathname);
@@ -65,7 +67,7 @@ const handle = Effect.gen(function* () {
     return HttpServerResponse.text("Method Not Allowed", { status: 405 });
   }
   const parsed = yield* request.json.pipe(Effect.orElseSucceed(() => null));
-  const draft = asRecord(parsed);
+  const draft = parseTicketThreadDraft(parsed);
   if (!draft) return HttpServerResponse.text("Bad Request", { status: 400 });
   const claimed = yield* Effect.promise(() =>
     locked(() => {

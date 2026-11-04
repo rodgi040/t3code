@@ -59,3 +59,17 @@ export function writeTicketThreadMap(file: string, map: TicketThreadMap): void {
 export function ticketThreadFile(baseDir: string): string {
   return NodePath.join(baseDir, "userdata", "flightplan-ticket-threads.json");
 }
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+/** Shape check for a PUT body: UUID thread id, short plain-token environment and project ids. */
+export function parseTicketThreadDraft(value: unknown): TicketThreadRecord | null {
+  if (value === null || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  const { threadId, environmentId, projectId } = row;
+  if (typeof threadId !== "string" || !UUID_PATTERN.test(threadId)) return null;
+  if (typeof environmentId !== "string" || !ID_PATTERN.test(environmentId)) return null;
+  if (typeof projectId !== "string" || !ID_PATTERN.test(projectId)) return null;
+  return { threadId, environmentId, projectId };
+}

@@ -371,9 +371,14 @@ export function spawnClaudeProcessGroup(
   });
   child.once("exit", (code) => {
     if (code && stderrTail.length > 0) {
-      console.error(
-        `claude stderr (exit ${code}): ${Buffer.concat(stderrTail).toString("utf8").slice(-4000)}`,
-      );
+      // Stderr can carry prompts or paths: only print it with an explicit debug switch.
+      if (process.env.T3CODE_DEBUG_CLAUDE_STDERR === "1") {
+        console.error(
+          `claude stderr (exit ${code}): ${Buffer.concat(stderrTail).toString("utf8").slice(-4000)}`,
+        );
+      } else {
+        console.error(`claude exited with code ${code}`);
+      }
     }
     try {
       signalProcessGroup(child.pid ?? 0, "SIGKILL");

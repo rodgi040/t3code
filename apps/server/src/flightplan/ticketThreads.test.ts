@@ -6,6 +6,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   claimTicketThread,
+  parseTicketThreadDraft,
   readTicketThreadMap,
   ticketIdFromPath,
   ticketThreadFile,
@@ -50,5 +51,22 @@ describe("flightplan ticket threads", () => {
     expect(readTicketThreadMap(file)["11"]?.threadId).toBe("thread-a");
     const mode = NodeFS.statSync(file).mode & 0o777;
     expect(mode).toBe(0o600);
+  });
+});
+
+describe("flightplan ticket thread draft validation", () => {
+  const ok = {
+    threadId: "123e4567-e89b-42d3-a456-426614174000",
+    environmentId: "env-1",
+    projectId: "proj_1",
+  };
+  it("accepts a well-formed draft", () => {
+    expect(parseTicketThreadDraft(ok)).toEqual(ok);
+  });
+  it("rejects bad thread ids and odd ids", () => {
+    expect(parseTicketThreadDraft({ ...ok, threadId: "thread-a" })).toBeNull();
+    expect(parseTicketThreadDraft({ ...ok, environmentId: "../x" })).toBeNull();
+    expect(parseTicketThreadDraft({ ...ok, projectId: 5 })).toBeNull();
+    expect(parseTicketThreadDraft(null)).toBeNull();
   });
 });
