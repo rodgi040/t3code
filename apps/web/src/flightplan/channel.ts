@@ -7,6 +7,7 @@ export interface FlightplanWorkPackage {
   readonly status?: string;
   readonly labels?: readonly string[];
   readonly url?: string;
+  readonly description?: string;
 }
 
 export interface FlightplanQuestion {
@@ -42,6 +43,10 @@ export function answerMessage(id: number, option: string, text: string): Flightp
   return { type: "fp:answer", id, option, text };
 }
 
+export function helloMessage(): { readonly type: "fp:hello" } {
+  return { type: "fp:hello" };
+}
+
 export function applyParentMessage(data: unknown, origin: string): boolean {
   if (!acceptParentOrigin(origin) || data === null || typeof data !== "object") return false;
   const message = data as { type?: unknown; wp?: FlightplanWorkPackage; items?: unknown };
@@ -71,6 +76,20 @@ function rememberTrace(id: string): void {
   publish();
 }
 
+export function withTicketStartContext(text: string): string {
+  const wp = state.context;
+  if (!wp) return text;
+  if (text.includes(`#${wp.id}`)) return text;
+  const lines = [
+    `Ticket #${wp.id}`,
+    `Titel: ${wp.subject}`,
+    wp.status ? `Status: ${wp.status}` : "",
+    wp.url ? `Link: ${wp.url}` : "",
+    wp.description ? `Beschreibung: ${wp.description}` : "",
+  ].filter((line) => line.length > 0);
+  return `${lines.join("\n")}\n\n${text}`;
+}
+
 export function stampClaudeTrace(text: string, instanceId: string | undefined): string {
   if (instanceId !== "claudeAgent" || text.includes("[[fp-trace:")) return text;
   const id = crypto.randomUUID();
@@ -91,6 +110,9 @@ export function installFlightplanChannel(target: Pick<Window, "addEventListener"
   target.addEventListener("message", (event) => {
     applyParentMessage(event.data, event.origin);
   });
+  if (target === window && window.parent !== window) {
+    window.parent.postMessage(helloMessage(), PARENT_ORIGIN);
+  }
 }
 
 function publish(): void {

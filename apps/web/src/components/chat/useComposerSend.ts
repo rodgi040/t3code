@@ -1,4 +1,4 @@
-import { stampClaudeTrace } from "../../flightplan/channel";
+import { stampClaudeTrace, withTicketStartContext } from "../../flightplan/channel";
 import {
   mergeDirectPreviewAnnotation,
   resolveBackgroundDraftWorkspaceOptions,
@@ -608,6 +608,7 @@ export function useComposerSend(input: ComposerSendInput) {
           previewAnnotationContextReference(directAnnotation.annotation),
         ])
       : promptRef.current;
+    promptForSend = withTicketStartContext(promptForSend);
     promptForSend = stampClaudeTrace(promptForSend, ctxSelectedModelSelection?.instanceId);
     const strandedThread = threadContextsOutsideEnvironment({
       text: promptForSend,

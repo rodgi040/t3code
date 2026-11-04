@@ -353,11 +353,28 @@ export function spawnClaudeProcessGroup(
       cwd: options.cwd,
       env: options.env,
       signal: options.signal,
-      stdio: ["pipe", "pipe", "ignore", "pipe"],
+      stdio: ["pipe", "pipe", "pipe", "pipe"],
       detached: true,
     },
   );
-  child.once("exit", () => {
+  const stderrTail: Buffer[] = [];
+  let stderrBytes = 0;
+  child.stderr?.on("data", (chunk: Buffer | string) => {
+    const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+    stderrTail.push(buf);
+    stderrBytes += buf.length;
+    while (stderrBytes > 8192 && stderrTail.length > 0) {
+      const removed = stderrTail.shift();
+      if (!removed) break;
+      stderrBytes -= removed.length;
+    }
+  });
+  child.once("exit", (code) => {
+    if (code && stderrTail.length > 0) {
+      console.error(
+        `claude stderr (exit ${code}): ${Buffer.concat(stderrTail).toString("utf8").slice(-4000)}`,
+      );
+    }
     try {
       signalProcessGroup(child.pid ?? 0, "SIGKILL");
     } catch {}
@@ -2552,17 +2569,31 @@ const CLAUDE_BYPASS_FULLY_AVAILABLE: ClaudeBypassAvailability = {
   autoDisabled: false,
 };
 
+// Claude Code exits 1 for bypassPermissions when uid is 0 unless it is already
+// inside a sandbox. The chat service runs as root, so that mode cannot start.
+export function claudeHostBlocksBypassPermissions(
+  env: NodeJS.ProcessEnv = process.env,
+  uid: number | undefined = typeof process.getuid === "function" ? process.getuid() : undefined,
+): boolean {
+  return uid === 0 && env.IS_SANDBOX !== "1" && !env.CLAUDE_CODE_BUBBLEWRAP;
+}
+
 export function claudeRuntimeQueryPolicyForRuntimePolicy(
   runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
   availability: ClaudeBypassAvailability = CLAUDE_BYPASS_FULLY_AVAILABLE,
+  options?: { readonly rootBlocksBypass?: boolean },
 ): ClaudeRuntimeQueryPolicy {
   const requestedMode = permissionModeForClaudeRuntimePolicy(runtimePolicy);
   const downgraded = requestedMode === "bypassPermissions" && availability.bypassDisabled;
+  const rootBlocked =
+    options?.rootBlocksBypass === true && requestedMode === "bypassPermissions" && !downgraded;
   const permissionMode = downgraded
     ? availability.autoDisabled
       ? "default"
       : "auto"
-    : requestedMode;
+    : rootBlocked
+      ? "dontAsk"
+      : requestedMode;
   const readOnlyTools =
     sandboxPolicyKindForClaudeRuntimePolicy(runtimePolicy) === "readOnly"
       ? CLAUDE_READ_ONLY_ALLOWED_TOOLS
@@ -4736,6 +4767,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         // A worktree handoff changes the project settings even within one session.
         let bypassCache: { cwd: string | null; availability: ClaudeBypassAvailability } | null =
           null;
+        const rootBlocksBypass = claudeHostBlocksBypassPermissions();
         const queryPolicyForTurn = Effect.fnUntraced(function* (
           turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
         ) {
@@ -4748,16 +4780,21 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           if (bypassCache === null || bypassCache.cwd !== cwd) {
             const resolved = yield* resolveBypassAvailability(cwd).pipe(Effect.option);
             if (Option.isNone(resolved)) {
-              return claudeRuntimeQueryPolicyForRuntimePolicy(turnInput.runtimePolicy, {
-                bypassDisabled: true,
-                autoDisabled: false,
-              });
+              return claudeRuntimeQueryPolicyForRuntimePolicy(
+                turnInput.runtimePolicy,
+                {
+                  bypassDisabled: true,
+                  autoDisabled: false,
+                },
+                { rootBlocksBypass },
+              );
             }
             bypassCache = { cwd, availability: resolved.value };
           }
           return claudeRuntimeQueryPolicyForRuntimePolicy(
             turnInput.runtimePolicy,
             bypassCache.availability,
+            { rootBlocksBypass },
           );
         });
         const openedNativeThreads = yield* Ref.make(new Set<string>());

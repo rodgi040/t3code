@@ -390,6 +390,24 @@ describe("ClaudeAdapterV2 runtime query policy", () => {
     );
   });
 
+  it("downgrades bypass to dontAsk when the host refuses root bypass", () => {
+    const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      cwd: "/workspace",
+    });
+    const blocked = ClaudeAdapterV2.claudeRuntimeQueryPolicyForRuntimePolicy(
+      runtimePolicy,
+      { bypassDisabled: false, autoDisabled: false },
+      { rootBlocksBypass: true },
+    );
+    assert.equal(blocked.permissionMode, "dontAsk");
+    assert.equal(blocked.allowDangerouslySkipPermissions, undefined);
+    assert.equal(ClaudeAdapterV2.claudeHostBlocksBypassPermissions({ IS_SANDBOX: "1" }, 0), false);
+    assert.equal(ClaudeAdapterV2.claudeHostBlocksBypassPermissions({}, 0), true);
+    assert.equal(ClaudeAdapterV2.claudeHostBlocksBypassPermissions({}, 1000), false);
+  });
+
   it("maps canonical read-only never policy to Claude dontAsk with read-only tools", () => {
     const queryPolicy = ClaudeAdapterV2.claudeRuntimeQueryPolicyForRuntimePolicy(
       ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({

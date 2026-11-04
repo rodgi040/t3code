@@ -2568,3 +2568,10 @@ code {
   outline: 2px solid var(--ring);
   outline-offset: -2px;
 }
+
+html[data-fp-embed="1"] [data-chat-header],
+html[data-fp-embed="1"] [data-sidebar="trigger"],
+html[data-fp-embed="1"] [data-sidebar="rail"],
+html[data-fp-embed="1"] [data-slot="sidebar"] {
+  display: none !important;
+}

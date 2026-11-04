@@ -5,11 +5,17 @@ import {
   acceptParentOrigin,
   answerMessage,
   applyParentMessage,
+  helloMessage,
   getFlightplanChat,
   stampClaudeTrace,
+  withTicketStartContext,
 } from "./channel";
 
 describe("flightplan parent channel", () => {
+  it("asks the parent for ticket context once the listener is up", () => {
+    expect(helloMessage()).toEqual({ type: "fp:hello" });
+  });
+
   it("ignores a foreign origin", () => {
     expect(acceptParentOrigin("http://evil.example")).toBe(false);
     expect(acceptParentOrigin("http://localhost:8092")).toBe(false);
@@ -47,6 +53,27 @@ describe("flightplan parent channel", () => {
       PARENT_ORIGIN,
     );
     expect(parent.postMessage.mock.calls[0]?.[1]).not.toBe("*");
+  });
+
+  it("prefixes the outgoing prompt with the ticket context once", () => {
+    applyParentMessage(
+      {
+        type: "fp:context",
+        wp: {
+          id: 1132,
+          subject: "Arbeitsplatz",
+          status: "In Arbeit",
+          url: "/work_packages/1132",
+          description: "Kurz",
+        },
+      },
+      PARENT_ORIGIN,
+    );
+    const prefixed = withTicketStartContext("Was ist offen?");
+    expect(prefixed).toContain("Ticket #1132");
+    expect(prefixed).toContain("Titel: Arbeitsplatz");
+    expect(prefixed).toContain("Was ist offen?");
+    expect(withTicketStartContext("Siehe #1132")).toBe("Siehe #1132");
   });
 
   it("stamps a trace marker only for Claude Code", () => {
