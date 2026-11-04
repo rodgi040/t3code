@@ -15,6 +15,15 @@ interface TicketThreadRecord {
   readonly projectId: string;
 }
 
+const EMPTY_PROJECTS_TIMEOUT_MS = 8000;
+
+export function embedNoProject(
+  projects: readonly { readonly archivedAt?: unknown }[],
+  waitedTooLong: boolean,
+): boolean {
+  return waitedTooLong && !projects.some((item) => item.archivedAt == null);
+}
+
 function claudeSelection(project: {
   readonly defaultModelSelection: { readonly instanceId: string } | null;
 }) {
@@ -41,11 +50,18 @@ function EmbedTicketRoute() {
   const createThread = useOrchestrationCommand(threadEnvironment.create, { reportFailure: false });
   const started = useRef(false);
   const [error, setError] = useState<string | null>(null);
+  const [waitedTooLong, setWaitedTooLong] = useState(false);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the embed registry on while this route is mounted
   useEffect(() => {
     setFlightplanEmbed(true);
     return () => setFlightplanEmbed(false);
+  }, []);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- flags a project list that stays empty
+  useEffect(() => {
+    const timer = window.setTimeout(() => setWaitedTooLong(true), EMPTY_PROJECTS_TIMEOUT_MS);
+    return () => window.clearTimeout(timer);
   }, []);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- claims this ticket's thread on the server and moves the router onto it
@@ -64,7 +80,7 @@ function EmbedTicketRoute() {
             projectId: project.id,
             title: `Ticket #${ticketId}`,
             modelSelection: claudeSelection(project),
-            runtimeMode: "full-access",
+            runtimeMode: "approval-required",
             interactionMode: "default",
             branch: null,
             worktreePath: null,
@@ -103,6 +119,13 @@ function EmbedTicketRoute() {
   }, [createThread, navigate, projects, ticketId]);
 
   if (error) return <p data-fp-embed-error="true">{error}</p>;
+  if (embedNoProject(projects, waitedTooLong)) {
+    return (
+      <p data-fp-embed-error="true">
+        Kein Projekt in T3 – volle Ansicht öffnen: <a href="/chat/">/chat/</a>
+      </p>
+    );
+  }
   return <p data-fp-embed-pending="true">Öffne den Chat…</p>;
 }
 
