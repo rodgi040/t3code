@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { isEmbedLocation, ticketIdFromEmbedPath } from "./embed";
+import {
+  flightplanEmbedOn,
+  isEmbedLocation,
+  setFlightplanEmbed,
+  subscribeFlightplanEmbed,
+  ticketIdFromEmbedPath,
+} from "./embed";
 
 describe("flightplan embed", () => {
   it("detects the embed route and the query flag", () => {
@@ -14,5 +20,16 @@ describe("flightplan embed", () => {
   it("reads the ticket id from the embed path", () => {
     expect(ticketIdFromEmbedPath("/embed/1132")).toBe("1132");
     expect(ticketIdFromEmbedPath("/")).toBeNull();
+  });
+
+  it("notifies subscribers (ChatView hides the details card while the flag is on)", () => {
+    let calls = 0;
+    const off = subscribeFlightplanEmbed(() => calls++);
+    setFlightplanEmbed(true);
+    expect(flightplanEmbedOn()).toBe(true);
+    setFlightplanEmbed(false);
+    expect(flightplanEmbedOn()).toBe(false);
+    off();
+    expect(calls).toBe(2);
   });
 });
