@@ -120,7 +120,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { flightplanEmbedOn, subscribeFlightplanEmbed } from "../flightplan/embed";
+import { flightplanEmbedOn, isEmbedLocation, subscribeFlightplanEmbed } from "../flightplan/embed";
 import { BackgroundThreadContext } from "./chat/backgroundThread";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import { assistantCitationFromLocation } from "../lib/assistantCitationNavigation";
@@ -436,7 +436,20 @@ export default function ChatView(props: ChatViewProps) {
   } = props;
   const embedded = parentPanel !== undefined;
   // Fork (flightplan): the ticket embed shows the chat only, no environment/git/script side card.
-  const fpEmbed = useSyncExternalStore(subscribeFlightplanEmbed, flightplanEmbedOn, () => false);
+  // Flightplan OP#1705: the iframe may load a thread URL with ?embed=1 without passing the embed route.
+  const fpEmbedStore = useSyncExternalStore(
+    subscribeFlightplanEmbed,
+    flightplanEmbedOn,
+    () => false,
+  );
+  const fpEmbedUrl = useLocation({
+    select: (location) => isEmbedLocation(location.pathname, location.searchStr),
+  });
+  const fpEmbed = fpEmbedStore || fpEmbedUrl;
+  // Flightplan OP#1705: the OpenProject start page frames /chat/ without the embed flag; a framed
+  // chat is narrow and short, so it takes the in-flow composer area too (the header stays).
+  const [fpFramed] = useState(() => typeof window !== "undefined" && window.parent !== window);
+  const fpLayout = fpEmbed || fpFramed;
   const canOperateThread = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   const canOperateTerminal = useEnvironmentScope(environmentId, AuthTerminalOperateScope);
   const draftId = routeKind === "draft" ? props.draftId : null;
@@ -1617,7 +1630,7 @@ export default function ChatView(props: ChatViewProps) {
   });
   // Flightplan OP#1719: with the composer area in flow, only the floating "Scroll to end"
   // button needs clearance below the last message.
-  const fpEmbedFlow = fpEmbed && !isDraftHeroState;
+  const fpEmbedFlow = fpLayout && !isDraftHeroState;
   const {
     transitionGroupRef: draftHeroTransitionGroupRef,
     composerAnchorRef: draftHeroComposerAnchorRef,
@@ -3538,10 +3551,10 @@ export default function ChatView(props: ChatViewProps) {
                 // the timeline; the empty state scrolls from the top instead of centring off-screen.
                 "scrollbar-gutter-both",
                 isDraftHeroState
-                  ? fpEmbed
+                  ? fpLayout
                     ? "pointer-events-none absolute inset-0 z-20 flex items-start overflow-y-auto"
                     : "pointer-events-none absolute inset-0 z-20 flex items-center"
-                  : fpEmbed
+                  : fpLayout
                     ? "pointer-events-none relative z-20 shrink-0 pt-1.5"
                     : "pointer-events-none absolute inset-x-0 bottom-0 z-20 pt-1.5 sm:pt-2",
               )}
@@ -3550,15 +3563,16 @@ export default function ChatView(props: ChatViewProps) {
                 ref={draftHeroTransitionGroupRef}
                 className={cn(
                   "chat-composer-lane w-full",
-                  fpEmbed && isDraftHeroState && "my-auto",
+                  fpLayout && isDraftHeroState && "my-auto",
                 )}
               >
                 <div
                   data-chat-composer-stack="true"
+                  data-fp-layout={fpLayout ? "true" : undefined}
                   className="group/composer-stack pointer-events-auto relative z-10 mx-auto w-full max-w-(--chat-content-max-width)"
                 >
                   {isDraftHeroState ? (
-                    <div className={fpEmbed ? "relative" : "absolute inset-x-0 bottom-full"}>
+                    <div className={fpLayout ? "relative" : "absolute inset-x-0 bottom-full"}>
                       <div
                         className="pb-4 group-has-data-[composer-shoulder-tab]/composer-stack:pb-0"
                         style={
