@@ -33,6 +33,11 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
    keeps the answered question visible as "Beantwortet: <Antwort> · Status jetzt <Status>", disables the button while
    sending ("Wird gesendet …") and shows a parent error as `role="alert"` (`sendAnswer`, `applyAnswered` in `channel.ts`,
    `FlightplanComposer.tsx`). The OpenProject module sends `fp:answered` to the iframe origin `http://localhost:8092`.
+9. Hermes logo (Flightplan OP#1703): the A2A instance `flightplanA2a` ("Gandalf") shows the Hermes agent logo
+   (round, white backdrop, `apps/web/src/flightplan/hermes-agent.png`, 96 px) instead of the default provider symbol.
+   `HermesAvatar.tsx` renders it; `ProviderInstanceIcon` takes an optional `instanceId` and swaps the icon, passed from
+   the model picker, model list, picker sidebar, sidebar thread rows and the embed target chip (`FlightplanComposer.tsx`).
+   Other instances keep their icon. The PNG is imported, so Vite applies the `/chat` base path.
 
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.

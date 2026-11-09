@@ -3,6 +3,7 @@ import { useSyncExternalStore } from "react";
 import type { ProviderInstanceId } from "@t3tools/contracts";
 
 import { getFlightplanChat, subscribeFlightplanChat, sendAnswer } from "./channel";
+import { HermesAvatar, isHermesInstance } from "./HermesAvatar";
 import { FLIGHTPLAN_TARGETS, modelForTarget } from "./targets";
 
 interface ModelEntry {
@@ -46,7 +47,7 @@ export function FlightplanComposer({
               type="button"
               data-fp-target={target.instanceId}
               aria-pressed={selected}
-              className="rounded-full border px-2 py-1"
+              className="inline-flex items-center gap-1 rounded-full border px-2 py-1"
               onClick={() =>
                 onSelect(
                   target.instanceId as ProviderInstanceId,
@@ -54,6 +55,8 @@ export function FlightplanComposer({
                 )
               }
             >
+              {/* Flightplan OP#1703: Hermes agent logo on its chip. */}
+              {isHermesInstance(target.instanceId) ? <HermesAvatar className="size-4" /> : null}
               {target.label}
             </button>
           );
