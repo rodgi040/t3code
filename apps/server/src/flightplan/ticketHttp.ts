@@ -63,7 +63,8 @@ const handle = Effect.gen(function* () {
 
   if (request.method === "GET") {
     const record = yield* Effect.promise(() => locked(() => readTicketThreadMap(file)[ticketId]));
-    return record ? json(record) : HttpServerResponse.text("Not Found", { status: 404 });
+    // A ticket without a thread yet is a normal state (first click): 200 with null instead of a console-filling 404.
+    return json(record ?? null);
   }
   if (request.method !== "PUT") {
     return HttpServerResponse.text("Method Not Allowed", { status: 405 });

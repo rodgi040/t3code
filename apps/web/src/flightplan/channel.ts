@@ -16,6 +16,7 @@ export interface FlightplanQuestion {
   readonly options?: readonly string[];
   readonly context?: string;
   readonly subject?: string;
+  readonly work_package_id?: number;
 }
 
 export interface FlightplanAnswer {
@@ -35,8 +36,53 @@ export interface FlightplanAnsweredMessage {
   readonly error?: string;
 }
 
+// Flightplan OP#1711 wave 2: ticket history events from the parent. Display only, never part of a prompt.
+export type FlightplanEventKind = "comment" | "status" | "question";
+
+export interface FlightplanEvent {
+  readonly id: string;
+  readonly kind: FlightplanEventKind;
+  readonly at: string;
+  readonly author: string;
+  /** Comment or question text (untrusted, rendered as plain text). */
+  readonly text: string;
+  readonly from: string;
+  readonly to: string;
+  /** "chat" when the comment was written from this chat. */
+  readonly source: string;
+}
+
+// Flightplan OP#1711 wave 2: a thread message that becomes a ticket comment (parent: POST /flightplan/chat/comments).
+export interface FlightplanCommentMessage {
+  readonly type: "fp:comment";
+  readonly wpId: number;
+  readonly text: string;
+  readonly clientId: string;
+}
+
+export interface FlightplanCommentedMessage {
+  readonly type: "fp:commented";
+  readonly wpId: number;
+  readonly clientId: string;
+  readonly ok: boolean;
+  readonly error?: string;
+}
+
+export type FlightplanCommentStatus =
+  | { readonly state: "idle" }
+  | { readonly state: "pending"; readonly clientId: string; readonly wpId: number }
+  | { readonly state: "saved"; readonly wpId: number }
+  | { readonly state: "error"; readonly wpId: number; readonly error: string };
+
+export const COMMENT_MAX_LENGTH = 4000;
+const EVENT_TEXT_MAX = 600;
+const EVENT_LIST_MAX = 60;
+const EVENT_KINDS: readonly string[] = ["comment", "status", "question"];
+
 export interface FlightplanDoneQuestion {
   readonly id: number;
+  /** Ticket the question belongs to, shown as "#<id>" like the dashboard confirmation. */
+  readonly workPackageId?: number;
   readonly question: string;
   readonly answer: string;
   readonly status: string;
@@ -52,6 +98,10 @@ export interface FlightplanChatState {
   /** Flightplan OP#1710: error text per question id reported by the parent. */
   readonly errors: Readonly<Record<number, string>>;
   readonly traceId: string | null;
+  /** Flightplan OP#1711: ticket the events belong to; shown only while it is the open ticket. */
+  readonly eventsFor: number | null;
+  readonly events: readonly FlightplanEvent[];
+  readonly comment: FlightplanCommentStatus;
 }
 
 const empty: FlightplanChatState = {
@@ -61,10 +111,16 @@ const empty: FlightplanChatState = {
   pending: {},
   errors: {},
   traceId: null,
+  eventsFor: null,
+  events: [],
+  comment: { state: "idle" },
 };
 let state: FlightplanChatState = empty;
 // Flightplan OP#1710: what was sent per question until the parent confirms it.
-const sentAnswers = new Map<number, { question: string; answer: string }>();
+const sentAnswers = new Map<
+  number,
+  { question: string; answer: string; workPackageId: number | undefined }
+>();
 const listeners = new Set<() => void>();
 
 export function acceptParentOrigin(origin: string): boolean {
@@ -83,7 +139,11 @@ export function sendAnswer(
   target: Pick<Window, "postMessage"> = window.parent,
 ): void {
   const label = (option || text).replace(/\s+/g, " ").trim().slice(0, 120);
-  sentAnswers.set(item.id, { question: item.question, answer: label });
+  sentAnswers.set(item.id, {
+    question: item.question,
+    answer: label,
+    workPackageId: item.work_package_id,
+  });
   state = {
     ...state,
     errors: without(state.errors, item.id),
@@ -102,6 +162,10 @@ export function applyParentMessage(data: unknown, origin: string): boolean {
   const message = data as { type?: unknown; wp?: FlightplanWorkPackage; items?: unknown };
   if (message.type === "fp:answered")
     return applyAnswered(data as Partial<FlightplanAnsweredMessage>);
+  if (message.type === "fp:events")
+    return applyEvents(data as { wpId?: unknown; events?: unknown });
+  if (message.type === "fp:commented")
+    return applyCommented(data as Partial<FlightplanCommentedMessage>);
   if (message.type === "fp:context" && message.wp && typeof message.wp.id === "number") {
     state = { ...state, context: message.wp };
     publish();
@@ -123,6 +187,112 @@ export function applyParentMessage(data: unknown, origin: string): boolean {
   return false;
 }
 
+function cleanText(value: unknown, maxLength: number): string {
+  if (typeof value !== "string") return "";
+  return value
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u2028\u2029]/g, "")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function toEvent(raw: unknown): FlightplanEvent | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const item = raw as Record<string, unknown>;
+  if (typeof item.id !== "string" || !/^[csq]\d+(-[0-9a-z]+){0,2}$/.test(item.id)) return null;
+  if (typeof item.kind !== "string" || !EVENT_KINDS.includes(item.kind)) return null;
+  return {
+    id: item.id,
+    kind: item.kind as FlightplanEventKind,
+    at: cleanText(item.at, 40),
+    author: cleanText(item.author, 80),
+    text: cleanText(item.text, EVENT_TEXT_MAX),
+    from: cleanText(item.from, 80),
+    to: cleanText(item.to, 80),
+    source: cleanText(item.source, 20),
+  };
+}
+
+/** Merge by id: repeated or reloaded batches never add a line twice. */
+function applyEvents(message: { wpId?: unknown; events?: unknown }): boolean {
+  if (typeof message.wpId !== "number" || !Array.isArray(message.events)) return false;
+  const incoming = message.events.flatMap((raw) => {
+    const event = toEvent(raw);
+    return event ? [event] : [];
+  });
+  const known = state.eventsFor === message.wpId ? state.events : [];
+  // The id carries the content ("c12-ab12cd34"); the part before the first "-" is the key of the line. The same id is a
+  // repeat, a new id with the same key replaces the older line (OP merges journals of one user into one journal).
+  const byKey = new Map<string, FlightplanEvent>();
+  for (const event of [...known, ...incoming]) byKey.set(event.id.split("-")[0] ?? event.id, event);
+  const merged = [...byKey.values()]
+    .toSorted(
+      (a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id, undefined, { numeric: true }),
+    )
+    .slice(-EVENT_LIST_MAX);
+  state = { ...state, eventsFor: message.wpId, events: merged };
+  publish();
+  return true;
+}
+
+/** One plain-text line per event. The caller renders it as a React text node, never as HTML. */
+export function eventLine(event: FlightplanEvent): string {
+  if (event.kind === "status") {
+    return `Status: ${event.from || "–"} → ${event.to || "–"}${event.author ? ` (${event.author})` : ""}`;
+  }
+  if (event.kind === "question") return `Rückfrage von ${event.author || "?"}: ${event.text}`;
+  const origin = event.source === "chat" ? " (aus Chat)" : "";
+  return `Kommentar von ${event.author || "?"}${origin}: ${event.text}`;
+}
+
+function commentMessage(wpId: number, text: string, clientId: string): FlightplanCommentMessage {
+  return { type: "fp:comment", wpId, text, clientId };
+}
+
+/**
+ * Flightplan OP#1711 wave 2: sends the confirmed text to the parent, which stores it as a ticket comment in the
+ * name of the signed-in human. Returns false for empty or too long text. Saved is not delivered.
+ */
+export function sendComment(
+  wpId: number,
+  text: string,
+  target: Pick<Window, "postMessage"> = window.parent,
+): boolean {
+  const clean = text.replace(/\r\n?/g, "\n").trim();
+  if (!Number.isInteger(wpId) || wpId <= 0 || !clean || clean.length > COMMENT_MAX_LENGTH)
+    return false;
+  if (state.comment.state === "pending") return false;
+  const clientId = crypto.randomUUID();
+  state = { ...state, comment: { state: "pending", clientId, wpId } };
+  publish();
+  target.postMessage(commentMessage(wpId, clean, clientId), PARENT_ORIGIN);
+  return true;
+}
+
+export function resetCommentStatus(): void {
+  if (state.comment.state === "pending") return;
+  state = { ...state, comment: { state: "idle" } };
+  publish();
+}
+
+function applyCommented(message: Partial<FlightplanCommentedMessage>): boolean {
+  if (typeof message.wpId !== "number" || typeof message.ok !== "boolean") return false;
+  if (typeof message.clientId !== "string") return false;
+  const current = state.comment;
+  if (current.state !== "pending" || current.clientId !== message.clientId) return false;
+  state = {
+    ...state,
+    comment: message.ok
+      ? { state: "saved", wpId: message.wpId }
+      : {
+          state: "error",
+          wpId: message.wpId,
+          error: cleanText(message.error, 200) || "Kommentar fehlgeschlagen",
+        },
+  };
+  publish();
+  return true;
+}
+
 function without(record: Readonly<Record<number, string>>, id: number): Record<number, string> {
   const next: Record<number, string> = { ...record };
   delete next[id];
@@ -141,6 +311,9 @@ function applyAnswered(message: Partial<FlightplanAnsweredMessage>): boolean {
     const known = state.questions.find((item) => item.id === id);
     const done: FlightplanDoneQuestion = {
       id,
+      ...((sent?.workPackageId ?? known?.work_package_id)
+        ? { workPackageId: sent?.workPackageId ?? known?.work_package_id }
+        : {}),
       question: sent?.question ?? known?.question ?? "",
       answer,
       status: typeof message.status === "string" ? message.status : "",
