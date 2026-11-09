@@ -173,6 +173,21 @@ describe("ticket context display and title (OP#1720)", () => {
       });
     });
 
+    it("keeps the ticket id of the answered question for the confirmation", () => {
+      sendAnswer({ id: 44, question: "Ok?", work_package_id: 1145 }, "Ja", "", {
+        postMessage: vi.fn(),
+      });
+      applyParentMessage(
+        { type: "fp:answered", questionId: 44, ok: true, status: "Neu" },
+        PARENT_ORIGIN,
+      );
+      expect(getFlightplanChat().answered.find((entry) => entry.id === 44)).toMatchObject({
+        workPackageId: 1145,
+        answer: "Ja",
+        status: "Neu",
+      });
+    });
+
     it("shows the error from the parent and allows a retry", () => {
       sendAnswer({ id: 42, question: "Noch mal?" }, "", "Text", { postMessage: vi.fn() });
       applyParentMessage(

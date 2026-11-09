@@ -202,8 +202,8 @@ export function FlightplanComposer({
           data-fp-answered={entry.id}
         >
           Beantwortet: {entry.answer}
-          {entry.question ? ` (${entry.question})` : ""}
-          {entry.status ? ` · Status jetzt ${entry.status}` : ""}
+          {entry.workPackageId ? ` – #${entry.workPackageId}` : ""}
+          {entry.status ? `, Status jetzt ${entry.status}` : ""}
         </p>
       ))}
       {chat.questions.map((item) => (

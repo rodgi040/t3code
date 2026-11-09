@@ -16,6 +16,7 @@ export interface FlightplanQuestion {
   readonly options?: readonly string[];
   readonly context?: string;
   readonly subject?: string;
+  readonly work_package_id?: number;
 }
 
 export interface FlightplanAnswer {
@@ -80,6 +81,8 @@ const EVENT_KINDS: readonly string[] = ["comment", "status", "question"];
 
 export interface FlightplanDoneQuestion {
   readonly id: number;
+  /** Ticket the question belongs to, shown as "#<id>" like the dashboard confirmation. */
+  readonly workPackageId?: number;
   readonly question: string;
   readonly answer: string;
   readonly status: string;
@@ -114,7 +117,10 @@ const empty: FlightplanChatState = {
 };
 let state: FlightplanChatState = empty;
 // Flightplan OP#1710: what was sent per question until the parent confirms it.
-const sentAnswers = new Map<number, { question: string; answer: string }>();
+const sentAnswers = new Map<
+  number,
+  { question: string; answer: string; workPackageId: number | undefined }
+>();
 const listeners = new Set<() => void>();
 
 export function acceptParentOrigin(origin: string): boolean {
@@ -133,7 +139,11 @@ export function sendAnswer(
   target: Pick<Window, "postMessage"> = window.parent,
 ): void {
   const label = (option || text).replace(/\s+/g, " ").trim().slice(0, 120);
-  sentAnswers.set(item.id, { question: item.question, answer: label });
+  sentAnswers.set(item.id, {
+    question: item.question,
+    answer: label,
+    workPackageId: item.work_package_id,
+  });
   state = {
     ...state,
     errors: without(state.errors, item.id),
@@ -299,6 +309,9 @@ function applyAnswered(message: Partial<FlightplanAnsweredMessage>): boolean {
     const known = state.questions.find((item) => item.id === id);
     const done: FlightplanDoneQuestion = {
       id,
+      ...((sent?.workPackageId ?? known?.work_package_id)
+        ? { workPackageId: sent?.workPackageId ?? known?.work_package_id }
+        : {}),
       question: sent?.question ?? known?.question ?? "",
       answer,
       status: typeof message.status === "string" ? message.status : "",

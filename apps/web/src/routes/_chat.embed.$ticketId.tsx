@@ -40,7 +40,7 @@ async function readTicketThread(ticketId: string): Promise<TicketThreadRecord | 
     credentials: "same-origin",
   });
   if (!response.ok) return null;
-  return (await response.json()) as TicketThreadRecord;
+  return (await response.json()) as TicketThreadRecord | null;
 }
 
 function EmbedTicketRoute() {
@@ -126,7 +126,7 @@ function EmbedTicketRoute() {
       </p>
     );
   }
-  return <p data-fp-embed-pending="true">Öffne den Chat…</p>;
+  return <p data-fp-embed-pending="true">Öffne Chat zu #{ticketId} …</p>;
 }
 
 export const Route = createFileRoute("/_chat/embed/$ticketId")({
