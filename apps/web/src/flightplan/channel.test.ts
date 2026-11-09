@@ -6,6 +6,7 @@ import {
   answerMessage,
   applyParentMessage,
   helloMessage,
+  sendAnswer,
   getFlightplanChat,
   stampClaudeTrace,
   withTicketStartContext,
@@ -135,5 +136,69 @@ describe("ticket context display and title (OP#1720)", () => {
     expect(shown.endsWith("was müssen wir tun?")).toBe(true);
     expect(ticketThreadTitle("kein Block")).toBeNull();
     expect(ticketContextForDisplay("kein Block")).toBe("kein Block");
+  });
+
+  // Flightplan OP#1710
+  describe("answer feedback", () => {
+    const question = { id: 41, question: "Weiter?", options: ["Ja", "Nein"] };
+
+    it("marks the question pending and posts fp:answer to the parent origin", () => {
+      const parent = { postMessage: vi.fn() };
+      sendAnswer(question, "Ja", "", parent);
+      expect(parent.postMessage).toHaveBeenCalledWith(
+        { type: "fp:answer", id: 41, option: "Ja", text: "" },
+        PARENT_ORIGIN,
+      );
+      expect(getFlightplanChat().pending[41]).toBe("Ja");
+    });
+
+    it("keeps the question as answered with the chosen answer and status", () => {
+      sendAnswer(question, "Ja", "", { postMessage: vi.fn() });
+      expect(
+        applyParentMessage(
+          { type: "fp:answered", questionId: 41, ok: true, status: "In Arbeit" },
+          PARENT_ORIGIN,
+        ),
+      ).toBe(true);
+      const chat = getFlightplanChat();
+      expect(chat.pending[41]).toBeUndefined();
+      expect(chat.answered.find((entry) => entry.id === 41)).toEqual({
+        id: 41,
+        question: "Weiter?",
+        answer: "Ja",
+        status: "In Arbeit",
+      });
+    });
+
+    it("shows the error from the parent and allows a retry", () => {
+      sendAnswer({ id: 42, question: "Noch mal?" }, "", "Text", { postMessage: vi.fn() });
+      applyParentMessage(
+        {
+          type: "fp:answered",
+          questionId: 42,
+          ok: false,
+          error: "Die Frage ist bereits beantwortet",
+        },
+        PARENT_ORIGIN,
+      );
+      expect(getFlightplanChat().errors[42]).toBe("Die Frage ist bereits beantwortet");
+      expect(getFlightplanChat().pending[42]).toBeUndefined();
+      expect(getFlightplanChat().answered.some((entry) => entry.id === 42)).toBe(false);
+      sendAnswer({ id: 42, question: "Noch mal?" }, "", "Text", { postMessage: vi.fn() });
+      expect(getFlightplanChat().errors[42]).toBeUndefined();
+    });
+
+    it("ignores fp:answered from a foreign origin or with a bad shape", () => {
+      expect(
+        applyParentMessage(
+          { type: "fp:answered", questionId: 43, ok: true },
+          "http://evil.example",
+        ),
+      ).toBe(false);
+      expect(
+        applyParentMessage({ type: "fp:answered", questionId: "x", ok: true }, PARENT_ORIGIN),
+      ).toBe(false);
+      expect(getFlightplanChat().answered.some((entry) => entry.id === 43)).toBe(false);
+    });
   });
 });

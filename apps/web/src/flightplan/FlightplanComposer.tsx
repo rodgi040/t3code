@@ -2,12 +2,7 @@ import { useSyncExternalStore } from "react";
 
 import type { ProviderInstanceId } from "@t3tools/contracts";
 
-import {
-  getFlightplanChat,
-  subscribeFlightplanChat,
-  answerMessage,
-  PARENT_ORIGIN,
-} from "./channel";
+import { getFlightplanChat, subscribeFlightplanChat, sendAnswer } from "./channel";
 import { FLIGHTPLAN_TARGETS, modelForTarget } from "./targets";
 
 interface ModelEntry {
@@ -69,6 +64,19 @@ export function FlightplanComposer({
           {chip}
         </span>
       ) : null}
+      {/* Flightplan OP#1710: answered questions stay visible with the chosen answer. */}
+      {chat.answered.map((entry) => (
+        <p
+          key={`done-${entry.id}`}
+          role="status"
+          className="rounded-md border p-2"
+          data-fp-answered={entry.id}
+        >
+          Beantwortet: {entry.answer}
+          {entry.question ? ` (${entry.question})` : ""}
+          {entry.status ? ` · Status jetzt ${entry.status}` : ""}
+        </p>
+      ))}
       {chat.questions.map((item) => (
         <form
           key={item.id}
@@ -79,10 +87,8 @@ export function FlightplanComposer({
             const form = event.currentTarget;
             const selected = form.querySelector<HTMLInputElement>("input[name='option']:checked");
             const text = form.querySelector<HTMLTextAreaElement>("textarea")?.value ?? "";
-            window.parent.postMessage(
-              answerMessage(item.id, selected?.value ?? "", text),
-              PARENT_ORIGIN,
-            );
+            // Flightplan OP#1710: pending/ok/error are tracked in channel.ts.
+            sendAnswer(item, selected?.value ?? "", text);
           }}
         >
           <p>{item.question}</p>
@@ -95,7 +101,14 @@ export function FlightplanComposer({
             ))}
           </div>
           <textarea name="text" rows={2} placeholder="Freitext" />
-          <button type="submit">Antworten</button>
+          <button type="submit" disabled={item.id in chat.pending}>
+            {item.id in chat.pending ? "Wird gesendet …" : "Antworten"}
+          </button>
+          {chat.errors[item.id] ? (
+            <p role="alert" className="text-destructive" data-fp-answer-error={item.id}>
+              {chat.errors[item.id]}
+            </p>
+          ) : null}
         </form>
       ))}
       <p data-fp-usage="true">

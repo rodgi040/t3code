@@ -28,6 +28,11 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
    skips messages with a `<ticket-context>` block (`ThreadTitleRegenerationService.ts`), and the message row shows a
    compact ticket line instead of the block (`ticketContextForDisplay` in `channel.ts`, `TimelineUserMessageRow.tsx`).
    The agent still receives the block unchanged.
+8. Answer confirmation (Flightplan OP#1710): after `fp:answer` the parent replies with
+   `{type:"fp:answered", questionId, ok, status, answer, error}` (accepted only from `http://localhost:8090`). The chat
+   keeps the answered question visible as "Beantwortet: <Antwort> · Status jetzt <Status>", disables the button while
+   sending ("Wird gesendet …") and shows a parent error as `role="alert"` (`sendAnswer`, `applyAnswered` in `channel.ts`,
+   `FlightplanComposer.tsx`). The OpenProject module sends `fp:answered` to the iframe origin `http://localhost:8092`.
 
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.
