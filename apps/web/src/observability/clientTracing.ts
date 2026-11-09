@@ -13,6 +13,7 @@ import * as ClientTracer from "./clientTracer";
 import * as PrimaryEnvironmentHttpLayer from "../environments/primary/httpLayer";
 import { isElectron } from "../env";
 import { APP_VERSION } from "~/branding";
+import { BASE_PATH } from "../basePath";
 
 const DEFAULT_EXPORT_INTERVAL_MS = 1_000;
 interface NavigatorUserAgentData {
@@ -73,7 +74,23 @@ let activeScope: Scope.Closeable | null = null;
 let activeConfigKey: string | null = null;
 let pendingConfiguration = Promise.resolve();
 
+/**
+ * Fork (OP#1706): the web client does not export browser traces in the path-prefixed embed build
+ * (`T3CODE_WEB_BASE_PATH=/chat`), because the reverse proxy there only allows a fixed set of paths and would
+ * answer the exporter with 403. `VITE_T3CODE_DISABLE_CLIENT_TRACING` overrides the default at build time:
+ * "1"/"true" always disables, "0"/"false" keeps tracing on even with a base path.
+ */
+const CLIENT_TRACING_DISABLED = (() => {
+  const flag = import.meta.env.VITE_T3CODE_DISABLE_CLIENT_TRACING?.trim().toLowerCase();
+  if (flag === "1" || flag === "true") return true;
+  if (flag === "0" || flag === "false") return false;
+  return BASE_PATH !== "";
+})();
+
 export function configureClientTracing(): Promise<void> {
+  if (CLIENT_TRACING_DISABLED) {
+    return Promise.resolve();
+  }
   if (activeConfigKey !== null) {
     return pendingConfiguration;
   }

@@ -38,6 +38,10 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
    `HermesAvatar.tsx` renders it; `ProviderInstanceIcon` takes an optional `instanceId` and swaps the icon, passed from
    the model picker, model list, picker sidebar, sidebar thread rows and the embed target chip (`FlightplanComposer.tsx`).
    Other instances keep their icon. The PNG is imported, so Vite applies the `/chat` base path.
+10. Client tracing off in the embed (OP#1706): with `T3CODE_WEB_BASE_PATH` set, the web client does not start the OTLP
+    exporter (`configureClientTracing` in `apps/web/src/observability/clientTracing.ts`), so the chat proxy no longer
+    sees `POST /chat/api/observability/v1/traces` (403). `VITE_T3CODE_DISABLE_CLIENT_TRACING=1|0` forces it off or on at
+    build time. The server's own tracing is untouched.
 
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.
