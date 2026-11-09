@@ -25,14 +25,46 @@ export interface FlightplanAnswer {
   readonly text: string;
 }
 
+// Flightplan OP#1710: feedback from the parent after fp:answer.
+export interface FlightplanAnsweredMessage {
+  readonly type: "fp:answered";
+  readonly questionId: number;
+  readonly ok: boolean;
+  readonly status?: string;
+  readonly answer?: string;
+  readonly error?: string;
+}
+
+export interface FlightplanDoneQuestion {
+  readonly id: number;
+  readonly question: string;
+  readonly answer: string;
+  readonly status: string;
+}
+
 export interface FlightplanChatState {
   readonly context: FlightplanWorkPackage | null;
   readonly questions: readonly FlightplanQuestion[];
+  /** Flightplan OP#1710: answered questions stay visible with the chosen answer. */
+  readonly answered: readonly FlightplanDoneQuestion[];
+  /** Flightplan OP#1710: question ids waiting for the parent's reply. */
+  readonly pending: Readonly<Record<number, string>>;
+  /** Flightplan OP#1710: error text per question id reported by the parent. */
+  readonly errors: Readonly<Record<number, string>>;
   readonly traceId: string | null;
 }
 
-const empty: FlightplanChatState = { context: null, questions: [], traceId: null };
+const empty: FlightplanChatState = {
+  context: null,
+  questions: [],
+  answered: [],
+  pending: {},
+  errors: {},
+  traceId: null,
+};
 let state: FlightplanChatState = empty;
+// Flightplan OP#1710: what was sent per question until the parent confirms it.
+const sentAnswers = new Map<number, { question: string; answer: string }>();
 const listeners = new Set<() => void>();
 
 export function acceptParentOrigin(origin: string): boolean {
@@ -43,6 +75,24 @@ export function answerMessage(id: number, option: string, text: string): Flightp
   return { type: "fp:answer", id, option, text };
 }
 
+/** Flightplan OP#1710: sends the answer to the parent and marks the question as pending. */
+export function sendAnswer(
+  item: FlightplanQuestion,
+  option: string,
+  text: string,
+  target: Pick<Window, "postMessage"> = window.parent,
+): void {
+  const label = (option || text).replace(/\s+/g, " ").trim().slice(0, 120);
+  sentAnswers.set(item.id, { question: item.question, answer: label });
+  state = {
+    ...state,
+    errors: without(state.errors, item.id),
+    pending: { ...state.pending, [item.id]: label },
+  };
+  publish();
+  target.postMessage(answerMessage(item.id, option, text), PARENT_ORIGIN);
+}
+
 export function helloMessage(): { readonly type: "fp:hello" } {
   return { type: "fp:hello" };
 }
@@ -50,6 +100,8 @@ export function helloMessage(): { readonly type: "fp:hello" } {
 export function applyParentMessage(data: unknown, origin: string): boolean {
   if (!acceptParentOrigin(origin) || data === null || typeof data !== "object") return false;
   const message = data as { type?: unknown; wp?: FlightplanWorkPackage; items?: unknown };
+  if (message.type === "fp:answered")
+    return applyAnswered(data as Partial<FlightplanAnsweredMessage>);
   if (message.type === "fp:context" && message.wp && typeof message.wp.id === "number") {
     state = { ...state, context: message.wp };
     publish();
@@ -69,6 +121,43 @@ export function applyParentMessage(data: unknown, origin: string): boolean {
     return true;
   }
   return false;
+}
+
+function without(record: Readonly<Record<number, string>>, id: number): Record<number, string> {
+  const next: Record<number, string> = { ...record };
+  delete next[id];
+  return next;
+}
+
+function applyAnswered(message: Partial<FlightplanAnsweredMessage>): boolean {
+  const id = message.questionId;
+  if (typeof id !== "number" || typeof message.ok !== "boolean") return false;
+  const sent = sentAnswers.get(id);
+  const pending = without(state.pending, id);
+  const errors = without(state.errors, id);
+  if (message.ok) {
+    sentAnswers.delete(id);
+    const answer = sent?.answer || (typeof message.answer === "string" ? message.answer : "");
+    const known = state.questions.find((item) => item.id === id);
+    const done: FlightplanDoneQuestion = {
+      id,
+      question: sent?.question ?? known?.question ?? "",
+      answer,
+      status: typeof message.status === "string" ? message.status : "",
+    };
+    state = {
+      ...state,
+      pending,
+      errors,
+      answered: [...state.answered.filter((entry) => entry.id !== id), done],
+    };
+  } else {
+    const error =
+      typeof message.error === "string" && message.error ? message.error : "Antwort fehlgeschlagen";
+    state = { ...state, pending, errors: { ...errors, [id]: error } };
+  }
+  publish();
+  return true;
 }
 
 function rememberTrace(id: string): void {
