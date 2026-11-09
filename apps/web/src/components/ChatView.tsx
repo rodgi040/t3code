@@ -422,6 +422,8 @@ type ChatViewProps =
 
 const DismissedFallbackWindowSchema = Schema.NullOr(Schema.String);
 
+const FP_EMBED_END_INSET = 40;
+
 export default function ChatView(props: ChatViewProps) {
   const {
     environmentId,
@@ -1613,6 +1615,9 @@ export default function ChatView(props: ChatViewProps) {
     backgroundSubmissionPending,
     hasWorktreeSetupCard: worktreeSetup !== null,
   });
+  // Flightplan OP#1719: with the composer area in flow, only the floating "Scroll to end"
+  // button needs clearance below the last message.
+  const fpEmbedFlow = fpEmbed && !isDraftHeroState;
   const {
     transitionGroupRef: draftHeroTransitionGroupRef,
     composerAnchorRef: draftHeroComposerAnchorRef,
@@ -3498,7 +3503,7 @@ export default function ChatView(props: ChatViewProps) {
                 anchorMessageId={timelineAnchorMessageId}
                 onAnchorReady={onTimelineAnchorReadyStable}
                 onAnchorSizeChanged={onTimelineAnchorSizeChangedStable}
-                contentInsetEndAdjustment={composerTimelineInset}
+                contentInsetEndAdjustment={fpEmbedFlow ? FP_EMBED_END_INSET : composerTimelineInset}
                 liveFollowEnabled={timelineLiveFollowEnabled}
                 onIsAtEndChange={onIsAtEndChangeStable}
                 onViewportAttach={attachTimelineViewport}
@@ -3513,7 +3518,7 @@ export default function ChatView(props: ChatViewProps) {
 
               {showScrollToBottom && !isThreadFindActive && (
                 <ScrollToEndButton
-                  bottom={scrollToEndClearance + 4}
+                  bottom={fpEmbedFlow ? 4 : scrollToEndClearance + 4}
                   summary={scrollToEndSummary}
                   onScrollToEnd={() => scrollToEnd(true)}
                 />
@@ -3528,19 +3533,32 @@ export default function ChatView(props: ChatViewProps) {
               }}
               inert={isRevertingCheckpoint}
               data-chat-composer-overlay="true"
-              className={
+              className={cn(
+                // Flightplan OP#1719/1705: in the embed the composer area sits in the normal flow below
+                // the timeline; the empty state scrolls from the top instead of centring off-screen.
+                "scrollbar-gutter-both",
                 isDraftHeroState
-                  ? "pointer-events-none absolute inset-0 z-20 flex items-center"
-                  : "pointer-events-none absolute inset-x-0 bottom-0 z-20 pt-1.5 sm:pt-2"
-              }
+                  ? fpEmbed
+                    ? "pointer-events-none absolute inset-0 z-20 flex items-start overflow-y-auto"
+                    : "pointer-events-none absolute inset-0 z-20 flex items-center"
+                  : fpEmbed
+                    ? "pointer-events-none relative z-20 shrink-0 pt-1.5"
+                    : "pointer-events-none absolute inset-x-0 bottom-0 z-20 pt-1.5 sm:pt-2",
+              )}
             >
-              <div ref={draftHeroTransitionGroupRef} className="chat-composer-lane w-full">
+              <div
+                ref={draftHeroTransitionGroupRef}
+                className={cn(
+                  "chat-composer-lane w-full",
+                  fpEmbed && isDraftHeroState && "my-auto",
+                )}
+              >
                 <div
                   data-chat-composer-stack="true"
                   className="group/composer-stack pointer-events-auto relative z-10 mx-auto w-full max-w-(--chat-content-max-width)"
                 >
                   {isDraftHeroState ? (
-                    <div className="absolute inset-x-0 bottom-full">
+                    <div className={fpEmbed ? "relative" : "absolute inset-x-0 bottom-full"}>
                       <div
                         className="pb-4 group-has-data-[composer-shoulder-tab]/composer-stack:pb-0"
                         style={

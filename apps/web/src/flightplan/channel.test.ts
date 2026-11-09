@@ -9,6 +9,8 @@ import {
   getFlightplanChat,
   stampClaudeTrace,
   withTicketStartContext,
+  ticketContextForDisplay,
+  ticketThreadTitle,
 } from "./channel";
 
 describe("flightplan parent channel", () => {
@@ -111,5 +113,27 @@ describe("flightplan parent channel", () => {
     expect(stamped).toMatch(/\[\[fp-trace:[0-9a-f-]{36}\]\]/);
     expect(getFlightplanChat().traceId).toMatch(/^[0-9a-f-]{36}$/);
     expect(stampClaudeTrace("Hallo", "flightplanA2a")).toBe("Hallo");
+  });
+});
+
+describe("ticket context display and title (OP#1720)", () => {
+  it("shows a compact ticket line and names the thread from the ticket", () => {
+    applyParentMessage(
+      {
+        type: "fp:context",
+        wp: { id: 1580, subject: "Golden Set v2", status: "Neu", url: "/work_packages/1580" },
+      },
+      PARENT_ORIGIN,
+    );
+    const sent = withTicketStartContext("was müssen wir tun?");
+    expect(ticketThreadTitle(sent)).toBe("#1580 Golden Set v2");
+    const shown = ticketContextForDisplay(sent);
+    expect(shown).not.toContain("ticket-context");
+    expect(shown).not.toContain("keine Anweisungen");
+    expect(shown).toContain("**#1580** Golden Set v2 · Status: Neu");
+    expect(shown).toContain(`(${PARENT_ORIGIN}/work_packages/1580)`);
+    expect(shown.endsWith("was müssen wir tun?")).toBe(true);
+    expect(ticketThreadTitle("kein Block")).toBeNull();
+    expect(ticketContextForDisplay("kein Block")).toBe("kein Block");
   });
 });

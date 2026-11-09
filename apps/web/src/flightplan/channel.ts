@@ -103,6 +103,62 @@ export function withTicketStartContext(text: string): string {
   return `${block}\n${CONTEXT_NOTICE}\n\n${text}`;
 }
 
+// Flightplan OP#1720: the delimited block goes to the agent unchanged; the human sees a compact
+// ticket line and the thread title is "#<id> <Titel>" instead of the raw block.
+const CONTEXT_BLOCK = new RegExp(
+  `^\\s*<${CONTEXT_TAG}[^>]*>\\n([\\s\\S]*?)\\n</${CONTEXT_TAG}>(?:\\n${CONTEXT_NOTICE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})?\\s*`,
+);
+
+export interface FlightplanTicketRef {
+  readonly id: string;
+  readonly title: string;
+  readonly status: string | null;
+  readonly url: string | null;
+}
+
+function splitTicketContext(text: string): {
+  readonly ticket: FlightplanTicketRef | null;
+  readonly rest: string;
+} {
+  const match = CONTEXT_BLOCK.exec(text);
+  if (!match) return { ticket: null, rest: text };
+  const body = match[1] ?? "";
+  const field = (label: string) =>
+    body.match(new RegExp(`^${label}: (.*)$`, "m"))?.[1]?.trim() || null;
+  const id = body.match(/^Ticket #(\d+)/m)?.[1];
+  if (!id) return { ticket: null, rest: text };
+  return {
+    ticket: { id, title: field("Titel") ?? "", status: field("Status"), url: field("Link") },
+    rest: text.slice(match[0].length),
+  };
+}
+
+export function ticketThreadTitle(text: string): string | null {
+  const { ticket } = splitTicketContext(text);
+  if (!ticket) return null;
+  return `#${ticket.id} ${ticket.title}`.trim().slice(0, 120);
+}
+
+/** One markdown line for the human; the agent still receives the full block. */
+export function ticketContextForDisplay(text: string): string {
+  const { ticket, rest } = splitTicketContext(text);
+  if (!ticket) return text;
+  const escape = (value: string) => value.replace(/([\\`*_[\]<>])/g, "\\$1");
+  const link = ticket.url
+    ? ticket.url.startsWith("/")
+      ? `${PARENT_ORIGIN}${ticket.url}`
+      : ticket.url
+    : null;
+  const parts = [
+    `**#${ticket.id}** ${escape(ticket.title)}`,
+    ticket.status ? `Status: ${escape(ticket.status)}` : "",
+    link && /^https?:\/\//.test(link)
+      ? `[Ticket öffnen](${link.replace(/[()\s]/g, encodeURIComponent)})`
+      : "",
+  ].filter((part) => part.length > 0);
+  return `${parts.join(" · ")}\n\n${rest}`.trimEnd();
+}
+
 export function stampClaudeTrace(text: string, instanceId: string | undefined): string {
   if (instanceId !== "claudeAgent" || text.includes("[[fp-trace:")) return text;
   const id = crypto.randomUUID();

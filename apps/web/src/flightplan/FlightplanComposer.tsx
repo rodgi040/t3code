@@ -36,7 +36,11 @@ export function FlightplanComposer({
   const chip = chat.context ? `#${chat.context.id} ${chat.context.subject}` : null;
 
   return (
-    <div className="mb-2 flex flex-col gap-2 text-sm" data-flightplan-composer="true">
+    // Flightplan OP#1705: an open question may not take the whole narrow pane.
+    <div
+      className="mb-2 flex max-h-[45vh] flex-col gap-2 overflow-y-auto text-sm"
+      data-flightplan-composer="true"
+    >
       <div className="flex flex-wrap gap-1" role="group" aria-label="Ziel">
         {FLIGHTPLAN_TARGETS.map((target) => {
           const entry = entries.find((candidate) => candidate.instanceId === target.instanceId);
