@@ -2575,3 +2575,8 @@ html[data-fp-embed="1"] [data-sidebar="rail"],
 html[data-fp-embed="1"] [data-slot="sidebar"] {
   display: none !important;
 }
+
+/* Flightplan OP#1705: in the narrow framed chat the model chip may not run over the send button. */
+[data-fp-layout="true"] [data-chat-composer-footer-controls] {
+  overflow: hidden;
+}
