@@ -23,6 +23,7 @@ import type { OrchestratorV2Error } from "./Orchestrator.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 
+import { hasTicketContextBlock } from "../flightplan/prompt.ts";
 import { formatThreadTitleContext } from "@t3tools/provider-core/server/threadTitleContext";
 export { formatThreadTitleContext } from "@t3tools/provider-core/server/threadTitleContext";
 
@@ -136,6 +137,10 @@ const make = Effect.gen(function* () {
         const message = projection.messages.find(
           (candidate) => candidate.id === messageId && !candidate.streaming,
         );
+        // Flightplan OP#1720: a ticket start keeps its "#<id> <Titel>" seed; the block is no title source.
+        if (message !== undefined && hasTicketContextBlock(message.text)) {
+          return { type: "complete" as const };
+        }
         context =
           message === undefined
             ? { message: "", attachments: [] }

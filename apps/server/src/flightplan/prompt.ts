@@ -10,6 +10,11 @@ export function ticketIds(text: string): string[] {
   return [...new Set([...text.matchAll(TICKET)].map((match) => match[1] ?? ""))].filter(Boolean);
 }
 
+// Flightplan OP#1720: the web client prepends this block to a ticket start.
+export function hasTicketContextBlock(text: string): boolean {
+  return /^\s*<ticket-context[^>]*>/.test(text);
+}
+
 export function takeTraceMarker(text: string): { text: string; traceId: string | null } {
   const match = text.match(TRACE_MARKER);
   return {

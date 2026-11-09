@@ -1,4 +1,8 @@
-import { stampClaudeTrace, withTicketStartContext } from "../../flightplan/channel";
+import {
+  stampClaudeTrace,
+  ticketThreadTitle,
+  withTicketStartContext,
+} from "../../flightplan/channel";
 import {
   mergeDirectPreviewAnnotation,
   resolveBackgroundDraftWorkspaceOptions,
@@ -1242,11 +1246,14 @@ export function useComposerSend(input: ComposerSendInput) {
     clearComposerDraftContent(composerDraftTarget);
     composerRef.current?.resetCursorState();
 
-    const title = deriveThreadTitleSeed({
-      text: messageTextForSend,
-      attachments: composerAttachmentsSnapshot,
-      fallbackLabels: sendTitleFallbackLabels(sendSnapshot),
-    });
+    // Flightplan OP#1720: a ticket start names the thread "#<id> <Titel>", not the context block.
+    const title =
+      ticketThreadTitle(messageTextForSend) ??
+      deriveThreadTitleSeed({
+        text: messageTextForSend,
+        attachments: composerAttachmentsSnapshot,
+        fallbackLabels: sendTitleFallbackLabels(sendSnapshot),
+      });
     const threadCreateModelSelection = createModelSelection(
       ctxSelectedModelSelection.instanceId,
       ctxSelectedModel || activeProjectDefaultModelSelection?.model || DEFAULT_MODEL,

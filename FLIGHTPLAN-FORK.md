@@ -21,6 +21,13 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
 6. Hardening: `T3CODE_ALLOWED_ORIGINS` (WebSocket origin check for cookie auth), session cookie `Path`/`Secure`,
    `T3CODE_DISABLE_SURFACES=guest,mcp,oauth` (404), `T3CODE_SUPPRESS_STARTUP_PAIRING=1`, pairing links with the base path
    (`apps/server/src/flightplanConfig.ts`). Web build: `VITE_T3CODE_BASE_PATH_EXCLUDE` keeps `/api/v3/` unprefixed.
+7. Embed layout and ticket start (OP#1719, OP#1705, OP#1720): in the embed the composer area (agent chips, ticket
+   chip, usage line, questions) sits in the normal flow under the timeline instead of an absolute overlay, and the
+   empty state aligns to the top and scrolls on low height (`ChatView.tsx`, `FlightplanComposer.tsx`). A ticket
+   start names the thread `#<id> <Titel>` (`ticketThreadTitle` in `useComposerSend.ts`), the title regeneration
+   skips messages with a `<ticket-context>` block (`ThreadTitleRegenerationService.ts`), and the message row shows a
+   compact ticket line instead of the block (`ticketContextForDisplay` in `channel.ts`, `TimelineUserMessageRow.tsx`).
+   The agent still receives the block unchanged.
 
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.
