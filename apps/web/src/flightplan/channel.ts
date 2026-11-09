@@ -198,7 +198,7 @@ function cleanText(value: unknown, maxLength: number): string {
 function toEvent(raw: unknown): FlightplanEvent | null {
   if (raw === null || typeof raw !== "object") return null;
   const item = raw as Record<string, unknown>;
-  if (typeof item.id !== "string" || !/^[csq]\d+$/.test(item.id)) return null;
+  if (typeof item.id !== "string" || !/^[csq]\d+(-[0-9a-z]+){0,2}$/.test(item.id)) return null;
   if (typeof item.kind !== "string" || !EVENT_KINDS.includes(item.kind)) return null;
   return {
     id: item.id,
@@ -220,9 +220,11 @@ function applyEvents(message: { wpId?: unknown; events?: unknown }): boolean {
     return event ? [event] : [];
   });
   const known = state.eventsFor === message.wpId ? state.events : [];
-  const byId = new Map<string, FlightplanEvent>();
-  for (const event of [...known, ...incoming]) byId.set(event.id, event);
-  const merged = [...byId.values()]
+  // The id carries the content ("c12-ab12cd34"); the part before the first "-" is the key of the line. The same id is a
+  // repeat, a new id with the same key replaces the older line (OP merges journals of one user into one journal).
+  const byKey = new Map<string, FlightplanEvent>();
+  for (const event of [...known, ...incoming]) byKey.set(event.id.split("-")[0] ?? event.id, event);
+  const merged = [...byKey.values()]
     .toSorted(
       (a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id, undefined, { numeric: true }),
     )

@@ -247,6 +247,34 @@ describe("ticket history events", () => {
     expect(chat.events.map((event) => event.id)).toEqual(["c12", "s13"]);
   });
 
+  it("accepts content ids and replaces the older line with the same key", () => {
+    applyParentMessage(
+      { type: "fp:events", wpId: 20, events: [comment, { ...status, id: "s13-1-2" }] },
+      PARENT_ORIGIN,
+    );
+    applyParentMessage(
+      { type: "fp:events", wpId: 20, events: [{ ...comment, id: "c12-ab12cd34" }] },
+      PARENT_ORIGIN,
+    );
+    expect(getFlightplanChat().events.map((event) => event.id)).toEqual([
+      "c12-ab12cd34",
+      "s13-1-2",
+    ]);
+    // a later status in the same journal shows the new line, not both
+    applyParentMessage(
+      { type: "fp:events", wpId: 20, events: [{ ...status, id: "s13-1-3", to: "Wartet" }] },
+      PARENT_ORIGIN,
+    );
+    const lines = getFlightplanChat().events.filter((event) => event.kind === "status");
+    expect(lines.map((event) => event.id)).toEqual(["s13-1-3"]);
+    // the same batch again adds nothing
+    applyParentMessage(
+      { type: "fp:events", wpId: 20, events: [{ ...status, id: "s13-1-3", to: "Wartet" }] },
+      PARENT_ORIGIN,
+    );
+    expect(getFlightplanChat().events).toHaveLength(2);
+  });
+
   it("replaces the list when another ticket is opened", () => {
     applyParentMessage({ type: "fp:events", wpId: 5, events: [comment] }, PARENT_ORIGIN);
     applyParentMessage({ type: "fp:events", wpId: 6, events: [status] }, PARENT_ORIGIN);

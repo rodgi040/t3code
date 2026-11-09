@@ -31,7 +31,7 @@ function TicketHistory({ lines }: { readonly lines: readonly { id: string; text:
   if (lines.length === 0) return null;
   return (
     <ul
-      className="max-h-40 overflow-y-auto rounded-md border p-2 text-muted-foreground"
+      className="max-h-40 min-h-24 shrink-0 overflow-y-auto rounded-md border p-2 text-muted-foreground"
       aria-label="Verlauf des Tickets"
       data-fp-history="true"
     >
@@ -61,7 +61,13 @@ function TicketComment({ wpId, title }: { readonly wpId: number; readonly title:
   return (
     <div className="flex flex-col gap-1 rounded-md border p-2" data-fp-comment-box="true">
       {confirming ? (
-        <div className="flex flex-col gap-1" role="group" aria-label="Als Kommentar speichern?">
+        <div
+          className="flex flex-col gap-1"
+          role="group"
+          aria-label="Als Kommentar speichern?"
+          // The box must lie fully inside the visible pane, buttons included (short iframe viewport).
+          ref={(node) => node?.scrollIntoView({ block: "nearest" })}
+        >
           <p>
             <strong>#{wpId}</strong> {title}
           </p>
@@ -120,14 +126,16 @@ function TicketComment({ wpId, title }: { readonly wpId: number; readonly title:
         </p>
       ) : null}
       {own && status.state === "error" ? (
-        <p role="alert" className="text-destructive" data-fp-comment-error="true">
-          {status.error}
+        <div className="flex flex-col items-start gap-1" data-fp-comment-error="true">
+          <p role="alert" className="text-destructive">
+            {status.error}
+          </p>
           {sent && !draft ? (
             <button type="button" onClick={() => setDraft(sent)}>
               Text zurückholen
             </button>
           ) : null}
-        </p>
+        </div>
       ) : null}
     </div>
   );
