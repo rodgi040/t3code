@@ -824,10 +824,25 @@ export const layer: Layer.Layer<
         text: message.text,
         records: message.context?.records ?? [],
       });
+      // Flightplan OP#1803: the session context goes out once. Earlier runs count only when they carried a real
+      // message; the turn-start projection holds the earlier `/compact` and `/goal` messages, nothing else.
+      const earlierCommandIds = new Set(
+        projection.messages
+          .filter((candidate) => candidate.id !== message.id)
+          .map((candidate) => candidate.id),
+      );
+      const firstTurn = projection.runs.every(
+        (candidate) =>
+          candidate.userMessageId === message.id ||
+          (candidate.userMessageId !== null && earlierCommandIds.has(candidate.userMessageId)),
+      );
       const userText = yield* Effect.promise(() =>
-        enrichFlightplanPrompt({ text: draftedUserText, driver: session.driver }).catch(
-          () => draftedUserText,
-        ),
+        enrichFlightplanPrompt({
+          text: draftedUserText,
+          driver: session.driver,
+          firstTurn,
+          threadId: input.threadId,
+        }).catch(() => draftedUserText),
       );
       // Codex and Claude parse /goal from the prompt, so it goes verbatim and history waits a turn.
       const goalDriver = session.driver === "codex" || session.driver === "claudeAgent";

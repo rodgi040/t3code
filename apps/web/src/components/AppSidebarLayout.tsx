@@ -10,6 +10,7 @@ import {
 import { useLocation, useRouter, type AnyRouter } from "@tanstack/react-router";
 
 import { flightplanEmbedOn, isEmbedLocation, subscribeFlightplanEmbed } from "../flightplan/embed";
+import { FlightplanActivity } from "../flightplan/FlightplanActivity";
 import { moveWorkspaceFocus, workspaceAreaProps } from "../lib/workspaceFocus";
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { isElectron } from "../env";
@@ -461,6 +462,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
         defaultOpen
         style={sidebarProviderStyle}
       >
+        <FlightplanActivity />
         {embed ? null : (
           <SidebarBrandWidthProbe isElectron={isElectron} onWidthChange={setBrandWidth} />
         )}

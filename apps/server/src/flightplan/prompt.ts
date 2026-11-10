@@ -3,7 +3,8 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 
 const TICKET = /#(\d+)/g;
-const TRACE_MARKER = /\[\[fp-trace:([0-9a-f-]{36})\]\]/i;
+const TRACE_MARKER = /\[\[fp-trace:([0-9a-f-]{36})\]\]/gi;
+const SLASH_COMMAND = /^\/[a-z][\w-]*(?:\s|$)/i;
 const CAP = 8_000;
 
 export function ticketIds(text: string): string[] {
@@ -16,11 +17,16 @@ export function hasTicketContextBlock(text: string): boolean {
 }
 
 export function takeTraceMarker(text: string): { text: string; traceId: string | null } {
-  const match = text.match(TRACE_MARKER);
+  const match = [...text.matchAll(TRACE_MARKER)][0];
   return {
     text: text.replace(TRACE_MARKER, "").trimEnd(),
     traceId: match?.[1] ?? null,
   };
+}
+
+// Flightplan OP#1803: `/goal clear`, `/compact` and friends are parsed by the provider from the whole prompt.
+export function isSlashCommand(text: string): boolean {
+  return SLASH_COMMAND.test(text.trimStart());
 }
 
 function withTicketContext(
@@ -65,7 +71,7 @@ function runFpOp(id: string): Promise<{ id: string; ok: boolean; body: string }>
   });
 }
 
-async function openClaudeTrace(traceId: string): Promise<string | null> {
+async function openClaudeTrace(traceId: string, threadId?: string): Promise<string | null> {
   const path = process.env.FP_LANGFUSE_ENV || "/root/.config/fp-langfuse-sender/env";
   if (!NodeFS.existsSync(path)) return null;
   let publicKey = "";
@@ -92,7 +98,12 @@ async function openClaudeTrace(traceId: string): Promise<string | null> {
         id,
         type: "trace-create",
         timestamp: new Date().toISOString(),
-        body: { id, name: "t3-fp-claude", metadata: { source: "t3-fp" } },
+        body: {
+          id,
+          name: "t3-fp-claude",
+          ...(threadId ? { sessionId: threadId } : {}),
+          metadata: { source: "t3-fp", ...(threadId ? { threadId } : {}) },
+        },
       },
     ],
   };
@@ -111,22 +122,30 @@ async function openClaudeTrace(traceId: string): Promise<string | null> {
   }
 }
 
+/**
+ * Flightplan OP#1803: the session context (fp-op hint, trace id) goes to the agent once, with the first turn of a
+ * thread. Later turns and slash commands reach the provider without additions; the Langfuse trace of a later turn is
+ * tied to the thread through its metadata instead of the prompt text.
+ */
 export async function enrichFlightplanPrompt(input: {
   text: string;
   driver: string;
+  firstTurn: boolean;
+  threadId?: string;
   run?: (id: string) => Promise<{ id: string; ok: boolean; body: string }>;
-  trace?: (id: string) => Promise<string | null>;
+  trace?: (id: string, threadId?: string) => Promise<string | null>;
 }): Promise<string> {
   const marked = takeTraceMarker(input.text);
+  if (isSlashCommand(marked.text)) return marked.text;
   const ids = ticketIds(marked.text);
   const run = input.run ?? runFpOp;
   const blocks = [];
   for (const id of ids) blocks.push(await run(id));
-  let text = withClaudeHint(withTicketContext(marked.text, blocks), input.driver);
-  if (input.driver === "claudeAgent") {
-    const traceId = marked.traceId ?? NodeCrypto.randomUUID();
-    const opened = await (input.trace ?? openClaudeTrace)(traceId);
-    if (opened) text = `${text}\n\nTrace: ${opened}`;
-  }
-  return text;
+  const text = withTicketContext(marked.text, blocks);
+  if (input.driver !== "claudeAgent") return text;
+  const traceId = marked.traceId ?? NodeCrypto.randomUUID();
+  const opened = await (input.trace ?? openClaudeTrace)(traceId, input.threadId);
+  if (!input.firstTurn) return text;
+  const hinted = withClaudeHint(text, input.driver);
+  return opened ? `${hinted}\n\nTrace: ${opened}` : hinted;
 }

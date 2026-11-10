@@ -1,8 +1,4 @@
-import {
-  stampClaudeTrace,
-  ticketThreadTitle,
-  withTicketStartContext,
-} from "../../flightplan/channel";
+import { ticketThreadTitle, withTicketStartContext } from "../../flightplan/channel";
 import {
   mergeDirectPreviewAnnotation,
   resolveBackgroundDraftWorkspaceOptions,
@@ -612,8 +608,10 @@ export function useComposerSend(input: ComposerSendInput) {
           previewAnnotationContextReference(directAnnotation.annotation),
         ])
       : promptRef.current;
-    promptForSend = withTicketStartContext(promptForSend, activeThread.id);
-    promptForSend = stampClaudeTrace(promptForSend, ctxSelectedModelSelection?.instanceId);
+    // Flightplan OP#1803: the ticket block opens a thread; later messages and slash commands go out as typed.
+    if (isLocalDraftThread && !promptForSend.trimStart().startsWith("/")) {
+      promptForSend = withTicketStartContext(promptForSend, activeThread.id);
+    }
     const strandedThread = threadContextsOutsideEnvironment({
       text: promptForSend,
       records: composerThreadContexts,
