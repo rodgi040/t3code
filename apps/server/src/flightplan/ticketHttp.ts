@@ -12,6 +12,7 @@ import {
   claimTicketThread,
   readTicketThreadMap,
   parseTicketThreadDraft,
+  parseTicketThreadReplaces,
   ticketIdFromPath,
   ticketThreadFile,
   writeTicketThreadMap,
@@ -74,7 +75,12 @@ const handle = Effect.gen(function* () {
   if (!draft) return HttpServerResponse.text("Bad Request", { status: 400 });
   const claimed = yield* Effect.promise(() =>
     locked(() => {
-      const result = claimTicketThread(readTicketThreadMap(file), ticketId, draft);
+      const result = claimTicketThread(
+        readTicketThreadMap(file),
+        ticketId,
+        draft,
+        parseTicketThreadReplaces(parsed),
+      );
       if (result.created) writeTicketThreadMap(file, result.map);
       return result;
     }),

@@ -18,9 +18,13 @@ export function claimTicketThread(
   map: TicketThreadMap,
   ticketId: string,
   draft: TicketThreadRecord,
+  replaces?: string | null,
 ): { map: TicketThreadMap; record: TicketThreadRecord; created: boolean } {
   const existing = map[ticketId];
-  if (existing?.threadId) return { map, record: existing, created: false };
+  // OP#1784: a deleted thread is replaced only when the caller names the thread it saw.
+  if (existing?.threadId && existing.threadId !== replaces) {
+    return { map, record: existing, created: false };
+  }
   return {
     map: { ...map, [ticketId]: draft },
     record: draft,
@@ -72,4 +76,10 @@ export function parseTicketThreadDraft(value: unknown): TicketThreadRecord | nul
   if (typeof environmentId !== "string" || !ID_PATTERN.test(environmentId)) return null;
   if (typeof projectId !== "string" || !ID_PATTERN.test(projectId)) return null;
   return { threadId, environmentId, projectId };
+}
+
+export function parseTicketThreadReplaces(value: unknown): string | null {
+  if (value === null || typeof value !== "object") return null;
+  const { replaces } = value as Record<string, unknown>;
+  return typeof replaces === "string" && UUID_PATTERN.test(replaces) ? replaces : null;
 }

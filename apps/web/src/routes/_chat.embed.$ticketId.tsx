@@ -6,7 +6,12 @@ import { useEffect, useRef, useState } from "react";
 import { bindTicketThread } from "../flightplan/channel";
 import { flightplanFrameFull, isFullLayoutSearch, setFlightplanEmbed } from "../flightplan/embed";
 import { newThreadId } from "../lib/utils";
-import { useProjects } from "../state/entities";
+import { Button } from "../components/ui/button";
+import {
+  useAllEnvironmentShellsBootstrapped,
+  useProjects,
+  useThreadShells,
+} from "../state/entities";
 import { threadEnvironment } from "../state/threads";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
 
@@ -54,6 +59,11 @@ function EmbedTicketRoute() {
   const started = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [waitedTooLong, setWaitedTooLong] = useState(false);
+  // OP#1784: the ticket's thread was deleted in T3; the user decides whether a new one replaces it.
+  const [missing, setMissing] = useState<string | null>(null);
+  const [replace, setReplace] = useState<string | null>(null);
+  const shells = useThreadShells();
+  const shellsReady = useAllEnvironmentShellsBootstrapped();
 
   const fullLayout = flightplanFrameFull() || isFullLayoutSearch(searchStr);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the embed registry on while this route is mounted
@@ -72,10 +82,15 @@ function EmbedTicketRoute() {
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- claims this ticket's thread on the server and moves the router onto it
   useEffect(() => {
     const project = projects.find((item) => item.archivedAt == null);
-    if (!project || started.current) return;
+    if (!project || !shellsReady || missing || started.current) return;
     started.current = true;
     void (async () => {
-      let record = await readTicketThread(ticketId);
+      let record = replace ? null : await readTicketThread(ticketId);
+      if (record && !shells.some((shell) => shell.id === record?.threadId)) {
+        started.current = false;
+        setMissing(record.threadId);
+        return;
+      }
       if (!record) {
         const threadId = newThreadId();
         const created = await createThread({
@@ -103,6 +118,7 @@ function EmbedTicketRoute() {
             threadId,
             environmentId: project.environmentId,
             projectId: project.id,
+            ...(replace ? { replaces: replace } : {}),
           }),
         });
         if (!put.ok) throw new Error(`Thread-Zuordnung ${put.status}`);
@@ -122,9 +138,35 @@ function EmbedTicketRoute() {
       started.current = false;
       setError(cause instanceof Error ? cause.message : "Chat konnte nicht geöffnet werden.");
     });
-  }, [createThread, fullLayout, navigate, projects, ticketId]);
+  }, [
+    createThread,
+    fullLayout,
+    missing,
+    navigate,
+    projects,
+    replace,
+    shells,
+    shellsReady,
+    ticketId,
+  ]);
 
   if (error) return <p data-fp-embed-error="true">{error}</p>;
+  if (missing) {
+    return (
+      <div className="flex flex-col items-start gap-2 p-4 text-sm" data-fp-embed-missing={ticketId}>
+        <p>Der Chat zu #{ticketId} wurde in T3 gelöscht.</p>
+        <Button
+          size="sm"
+          onClick={() => {
+            setReplace(missing);
+            setMissing(null);
+          }}
+        >
+          Neuen Chat für #{ticketId} anlegen
+        </Button>
+      </div>
+    );
+  }
   if (embedNoProject(projects, waitedTooLong)) {
     return (
       <p data-fp-embed-error="true">

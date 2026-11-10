@@ -33,6 +33,16 @@ describe("flightplan ticket threads", () => {
     });
     expect(second.created).toBe(false);
     expect(second.record.threadId).toBe("thread-a");
+    const stale = claimTicketThread(first.map, "11", second.record, "thread-x");
+    expect(stale.record.threadId).toBe("thread-a");
+    const replaced = claimTicketThread(
+      first.map,
+      "11",
+      { threadId: "thread-b", environmentId: "env", projectId: "project" },
+      "thread-a",
+    );
+    expect(replaced.created).toBe(true);
+    expect(replaced.map["11"]?.threadId).toBe("thread-b");
     const other = claimTicketThread(second.map, "12", {
       threadId: "thread-c",
       environmentId: "env",
