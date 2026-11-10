@@ -54,6 +54,11 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     opened for the ticket (`bindTicketThread`, `ticketForThread` in `channel.ts`), so another thread or a new chat shows
     nothing ticket-related. A query parameter was chosen over a parent message because it is known before the first
     render and needs no handshake; the proxy allowlist matches `$uri` without the query, so no proxy change is needed.
+12. Thread report to the dashboard (OP#1778): in the full layout the chat posts `{type:"fp:thread", threadId,
+    ticketId}` to `http://localhost:8090` whenever the open thread or its title changes (`reportThread` in
+    `channel.ts`, called from `ChatView`). `ticketId` is the ticket the parent opened for that thread, else a ticket named
+    in the title (`Ticket #<id>`, `#<id> <Titel>`), else `null`. The dashboard moves its "Im Chat" mark with it. Repeats are
+    dropped; the compact embed and standalone pages send nothing.
 
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.

@@ -323,6 +323,7 @@ import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/Compos
 import { modelFallbackBannerItem } from "./chat/ComposerUsageLimits";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { FlightplanComposer } from "../flightplan/FlightplanComposer";
+import { reportThread } from "../flightplan/channel";
 import { resolveThreadSyncPhase } from "../threadSync";
 import {
   hasAvailableCompactionProvider,
@@ -830,6 +831,11 @@ export default function ChatView(props: ChatViewProps) {
     : undefined;
   const isServerThread = serverThread !== null;
   const activeThread = isServerThread ? serverThread : localDraftThread;
+  const fpThreadTitle = activeThread?.title ?? null;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tells the OpenProject parent frame which thread is open (Flightplan OP#1778, fp:thread)
+  useEffect(() => {
+    if (!embedded) reportThread(threadId, fpThreadTitle);
+  }, [embedded, threadId, fpThreadTitle]);
   const serverLatestRun =
     serverProjection === null ? null : deriveLatestThreadRun(serverProjection);
   const serverActivityRun =

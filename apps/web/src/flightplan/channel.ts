@@ -379,6 +379,39 @@ export function bindTicketThread(ticketId: number, threadId: string): void {
   publish();
 }
 
+export function threadMessage(
+  chat: FlightplanChatState,
+  threadId: string | null,
+  title: string | null,
+): {
+  readonly type: "fp:thread";
+  readonly threadId: string | null;
+  readonly ticketId: number | null;
+} {
+  const bound = ticketForThread(chat, threadId, true)?.id ?? null;
+  const named = title?.match(/^(?:Ticket )?#(\d+)\b/)?.[1];
+  return { type: "fp:thread", threadId, ticketId: bound ?? (named ? Number(named) : null) };
+}
+
+let lastThreadReport = "";
+
+/** Flightplan OP#1778: tells the dashboard which thread (and ticket) the full-layout frame shows. */
+export function reportThread(
+  threadId: string | null,
+  title: string | null,
+  target: Pick<Window, "postMessage"> | null = typeof window !== "undefined" &&
+  window.parent !== window
+    ? window.parent
+    : null,
+): void {
+  if (!target || !flightplanFrameFull()) return;
+  const message = threadMessage(state, threadId, title);
+  const key = JSON.stringify(message);
+  if (key === lastThreadReport) return;
+  lastThreadReport = key;
+  target.postMessage(message, PARENT_ORIGIN);
+}
+
 export function withTicketStartContext(text: string, threadId?: string | null): string {
   const wp = ticketForThread(state, threadId);
   if (!wp) return text;
