@@ -36,7 +36,7 @@ function statusVariant(key: string | undefined) {
 
 function Meta({ label, value }: { readonly label?: string; readonly value: string }) {
   return (
-    <Badge variant="outline" size="sm">
+    <Badge variant="outline">
       {label ? <span className="font-normal text-muted-foreground">{label}</span> : null}
       {value}
     </Badge>
@@ -212,6 +212,7 @@ function TicketBarBody({
           <Button
             size="xs"
             variant="ghost-muted"
+            className="ms-auto"
             render={<a href={link} target="_blank" rel="noopener noreferrer" />}
             data-fp-ticket-bar-open="true"
           >
