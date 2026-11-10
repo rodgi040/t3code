@@ -48,7 +48,7 @@ function TicketHistory({ lines }: { readonly lines: readonly { id: string; text:
 
 // Flightplan OP#1711 wave 2: a message for the ticket becomes a comment in the name of the signed-in human, after an
 // explicit confirmation with ticket and text. Saved is not delivered: the agent reads it on its next read.
-function TicketComment({
+export function TicketComment({
   wpId,
   title,
   lines,
@@ -182,17 +182,14 @@ export function FlightplanComposer({
   readonly onSelect: (instanceId: ProviderInstanceId, model: string) => void;
 }) {
   const chat = useSyncExternalStore(subscribeFlightplanChat, getFlightplanChat, getFlightplanChat);
-  // Flightplan OP#1778: in the dashboard split only the ticket's own thread shows ticket parts.
-  const ticket = ticketForThread(chat, threadId);
+  // Flightplan OP#1784: in the dashboard split the ticket parts live in the ticket bar under the header; the composer
+  // keeps only the target chips and the token line. The compact embed (workplace page) is unchanged.
   const full = flightplanFrameFull();
+  const ticket = full ? null : ticketForThread(chat, threadId);
   const chip = ticket ? `#${ticket.id} ${ticket.subject}` : null;
   const ticketId = ticket?.id ?? null;
-  const questions = full
-    ? chat.questions.filter((item) => item.work_package_id === ticketId)
-    : chat.questions;
-  const answered = full
-    ? chat.answered.filter((entry) => entry.workPackageId === ticketId)
-    : chat.answered;
+  const questions = full ? [] : chat.questions;
+  const answered = full ? [] : chat.answered;
   const lines =
     ticketId !== null && chat.eventsFor === ticketId
       ? chat.events.map((event) => ({ id: event.id, text: eventLine(event) }))

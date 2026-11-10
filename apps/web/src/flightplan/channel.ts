@@ -10,6 +10,14 @@ export interface FlightplanWorkPackage {
   readonly labels?: readonly string[];
   readonly url?: string;
   readonly description?: string;
+  // Flightplan OP#1784: fields for the ticket bar. All optional; a missing field drops its piece of the bar.
+  readonly project_name?: string;
+  readonly status_label?: string;
+  readonly status_key?: string;
+  readonly type?: string;
+  readonly priority?: string;
+  readonly assignee?: string;
+  readonly updated_at?: string;
 }
 
 export interface FlightplanQuestion {
@@ -164,7 +172,12 @@ export function helloMessage(): { readonly type: "fp:hello" } {
 
 export function applyParentMessage(data: unknown, origin: string): boolean {
   if (!acceptParentOrigin(origin) || data === null || typeof data !== "object") return false;
-  const message = data as { type?: unknown; wp?: FlightplanWorkPackage; items?: unknown };
+  const message = data as {
+    type?: unknown;
+    wp?: FlightplanWorkPackage;
+    items?: unknown;
+    threadId?: unknown;
+  };
   if (message.type === "fp:answered")
     return applyAnswered(data as Partial<FlightplanAnsweredMessage>);
   if (message.type === "fp:events")
@@ -172,7 +185,12 @@ export function applyParentMessage(data: unknown, origin: string): boolean {
   if (message.type === "fp:commented")
     return applyCommented(data as Partial<FlightplanCommentedMessage>);
   if (message.type === "fp:context" && message.wp && typeof message.wp.id === "number") {
-    state = { ...state, context: message.wp };
+    // Flightplan OP#1784: a context with threadId answers fp:thread and binds the ticket to exactly that thread.
+    const ticketThread =
+      typeof message.threadId === "string" && message.threadId
+        ? { ticketId: message.wp.id, threadId: message.threadId }
+        : state.ticketThread;
+    state = { ...state, context: message.wp, ticketThread };
     publish();
     return true;
   }
@@ -379,33 +397,66 @@ export function bindTicketThread(ticketId: number, threadId: string): void {
   publish();
 }
 
-export function threadMessage(
-  chat: FlightplanChatState,
+function threadMessage(
   threadId: string | null,
-  title: string | null,
+  ticketId: number | null,
 ): {
   readonly type: "fp:thread";
   readonly threadId: string | null;
   readonly ticketId: number | null;
 } {
-  const bound = ticketForThread(chat, threadId, true)?.id ?? null;
-  const named = title?.match(/^(?:Ticket )?#(\d+)\b/)?.[1];
-  return { type: "fp:thread", threadId, ticketId: bound ?? (named ? Number(named) : null) };
+  return { type: "fp:thread", threadId, ticketId };
+}
+
+type TicketThreadLookup = (ticketId: number) => Promise<{ readonly threadId?: unknown } | null>;
+
+async function readTicketThreadRecord(
+  ticketId: number,
+): Promise<{ readonly threadId?: unknown } | null> {
+  const response = await fetch(`/api/flightplan/tickets/${ticketId}`, {
+    credentials: "same-origin",
+  });
+  if (!response.ok) return null;
+  return (await response.json()) as { readonly threadId?: unknown } | null;
+}
+
+/**
+ * The ticket of a thread. The binding from the dashboard counts first; otherwise the title only
+ * names a candidate ("Ticket #<n>" or "#<n> <title>") and the server's ticket-to-thread record must point to this thread.
+ */
+export async function resolveThreadTicket(
+  chat: FlightplanChatState,
+  threadId: string | null,
+  title: string | null,
+  lookup: TicketThreadLookup = readTicketThreadRecord,
+): Promise<number | null> {
+  if (!threadId) return null;
+  const bound = chat.ticketThread;
+  if (bound && bound.threadId === threadId) return bound.ticketId;
+  const named = Number(title?.match(/^(?:Ticket )?#(\d+)\b/)?.[1] ?? 0);
+  if (!named) return null;
+  const record = await lookup(named).catch(() => null);
+  return record?.threadId === threadId ? named : null;
 }
 
 let lastThreadReport = "";
+let threadReportSeq = 0;
 
-/** Flightplan OP#1778: tells the dashboard which thread (and ticket) the full-layout frame shows. */
-export function reportThread(
+/** Flightplan OP#1778/OP#1784: tells the dashboard which thread (and verified ticket) the full-layout frame shows. */
+export async function reportThread(
   threadId: string | null,
   title: string | null,
   target: Pick<Window, "postMessage"> | null = typeof window !== "undefined" &&
   window.parent !== window
     ? window.parent
     : null,
-): void {
+  lookup: TicketThreadLookup = readTicketThreadRecord,
+): Promise<void> {
   if (!target || !flightplanFrameFull()) return;
-  const message = threadMessage(state, threadId, title);
+  const seq = ++threadReportSeq;
+  const ticketId = await resolveThreadTicket(state, threadId, title, lookup);
+  if (seq !== threadReportSeq) return;
+  const message = threadMessage(threadId, ticketId);
   const key = JSON.stringify(message);
   if (key === lastThreadReport) return;
   lastThreadReport = key;
