@@ -609,7 +609,8 @@ export function useComposerSend(input: ComposerSendInput) {
         ])
       : promptRef.current;
     // Flightplan OP#1803: the ticket block opens a thread; later messages and slash commands go out as typed.
-    if (isLocalDraftThread && !promptForSend.trimStart().startsWith("/")) {
+    const opensThread = isLocalDraftThread || activeThread.latestUserMessageAt === null;
+    if (opensThread && !promptForSend.trimStart().startsWith("/")) {
       promptForSend = withTicketStartContext(promptForSend, activeThread.id);
     }
     const strandedThread = threadContextsOutsideEnvironment({
