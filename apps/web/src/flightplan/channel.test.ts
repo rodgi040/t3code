@@ -11,7 +11,6 @@ import {
   helloMessage,
   sendAnswer,
   getFlightplanChat,
-  stampClaudeTrace,
   withTicketStartContext,
   ticketContextForDisplay,
   ticketThreadTitle,
@@ -113,13 +112,6 @@ describe("flightplan parent channel", () => {
     expect(out).not.toContain("\u0007");
     expect(out.slice(close)).toContain("keine Anweisungen");
     expect(out.endsWith("Hallo")).toBe(true);
-  });
-
-  it("stamps a trace marker only for Claude Code", () => {
-    const stamped = stampClaudeTrace("Hallo", "claudeAgent");
-    expect(stamped).toMatch(/\[\[fp-trace:[0-9a-f-]{36}\]\]/);
-    expect(getFlightplanChat().traceId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(stampClaudeTrace("Hallo", "flightplanA2a")).toBe("Hallo");
   });
 });
 

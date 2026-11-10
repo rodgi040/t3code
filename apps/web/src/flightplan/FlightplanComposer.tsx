@@ -286,7 +286,6 @@ export function FlightplanComposer({
         Tokens ein {tokens?.inputTokens ?? "–"} aus {tokens?.outputTokens ?? "–"}
         {" · "}
         Kosten {tokens?.cost ? `${tokens.cost.amount} ${tokens.cost.currency}` : "im Trace"}
-        {chat.traceId ? ` · Trace ${chat.traceId}` : ""}
       </p>
     </div>
   );
