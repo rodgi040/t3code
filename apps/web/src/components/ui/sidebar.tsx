@@ -18,6 +18,7 @@ import {
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { useResizeDrag } from "~/hooks/useResizeDrag";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
+import { sidebarMobileQuery } from "~/flightplan/embed";
 import { setLocalStorageItem } from "~/hooks/useLocalStorage";
 import { resolveSidebarState, type ResponsiveSidebarState } from "./sidebarState";
 import * as Schema from "effect/Schema";
@@ -98,7 +99,8 @@ function useSidebarVisibility() {
 }
 
 // The `max-md` breakpoint, also read when a shortcut fires.
-const SIDEBAR_MOBILE_QUERY = "(max-width: 767px)";
+// Fork (flightplan) OP#1778: lower in the dashboard split frame, so the thread list stays visible at 1440 px.
+const SIDEBAR_MOBILE_QUERY = sidebarMobileQuery();
 
 function isMobileViewport(): boolean {
   return typeof window !== "undefined" && window.matchMedia(SIDEBAR_MOBILE_QUERY).matches;

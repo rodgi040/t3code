@@ -15,6 +15,9 @@ import {
   withTicketStartContext,
   ticketContextForDisplay,
   ticketThreadTitle,
+  bindTicketThread,
+  threadMessage,
+  ticketForThread,
 } from "./channel";
 
 describe("flightplan parent channel", () => {
@@ -410,5 +413,35 @@ describe("message as ticket comment (OP#1711 wave 2)", () => {
         "http://evil.example",
       ),
     ).toBe(false);
+  });
+});
+
+describe("ticket bound to its thread in the dashboard split (OP#1778)", () => {
+  it("shows the ticket only in the thread the parent opened for it", () => {
+    applyParentMessage({ type: "fp:context", wp: { id: 1778, subject: "Split" } }, PARENT_ORIGIN);
+    expect(ticketForThread(getFlightplanChat(), "thread-a", true)).toBeNull();
+    bindTicketThread(1778, "thread-a");
+    expect(ticketForThread(getFlightplanChat(), "thread-a", true)?.id).toBe(1778);
+    expect(ticketForThread(getFlightplanChat(), "thread-b", true)).toBeNull();
+    expect(ticketForThread(getFlightplanChat(), "thread-b", false)?.id).toBe(1778);
+  });
+
+  it("drops the binding when the parent sends another ticket", () => {
+    bindTicketThread(1778, "thread-a");
+    applyParentMessage({ type: "fp:context", wp: { id: 1779, subject: "Andere" } }, PARENT_ORIGIN);
+    expect(ticketForThread(getFlightplanChat(), "thread-a", true)).toBeNull();
+  });
+
+  it("reports the open thread with its ticket, or a ticket named in the title", () => {
+    applyParentMessage({ type: "fp:context", wp: { id: 1778, subject: "Split" } }, PARENT_ORIGIN);
+    bindTicketThread(1778, "thread-a");
+    expect(threadMessage(getFlightplanChat(), "thread-a", "Irgendwas")).toEqual({
+      type: "fp:thread",
+      threadId: "thread-a",
+      ticketId: 1778,
+    });
+    expect(threadMessage(getFlightplanChat(), "thread-b", "Ticket #1145").ticketId).toBe(1145);
+    expect(threadMessage(getFlightplanChat(), "thread-c", "#1720 Titel").ticketId).toBe(1720);
+    expect(threadMessage(getFlightplanChat(), "thread-d", "Kein Ticket 1720").ticketId).toBeNull();
   });
 });

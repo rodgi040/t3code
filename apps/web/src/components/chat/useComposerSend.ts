@@ -612,7 +612,7 @@ export function useComposerSend(input: ComposerSendInput) {
           previewAnnotationContextReference(directAnnotation.annotation),
         ])
       : promptRef.current;
-    promptForSend = withTicketStartContext(promptForSend);
+    promptForSend = withTicketStartContext(promptForSend, activeThread.id);
     promptForSend = stampClaudeTrace(promptForSend, ctxSelectedModelSelection?.instanceId);
     const strandedThread = threadContextsOutsideEnvironment({
       text: promptForSend,

@@ -1,9 +1,10 @@
 import { ProviderInstanceId, type EnvironmentId, type ThreadId } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, useLocation, useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 
-import { setFlightplanEmbed } from "../flightplan/embed";
+import { bindTicketThread } from "../flightplan/channel";
+import { flightplanFrameFull, isFullLayoutSearch, setFlightplanEmbed } from "../flightplan/embed";
 import { newThreadId } from "../lib/utils";
 import { useProjects } from "../state/entities";
 import { threadEnvironment } from "../state/threads";
@@ -47,16 +48,20 @@ function EmbedTicketRoute() {
   const { ticketId } = Route.useParams();
   const projects = useProjects();
   const navigate = useNavigate();
+  // Flightplan OP#1778: the dashboard split opens the ticket's thread in the full layout (sidebar, header).
+  const searchStr = useLocation({ select: (location) => location.searchStr });
   const createThread = useOrchestrationCommand(threadEnvironment.create, { reportFailure: false });
   const started = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [waitedTooLong, setWaitedTooLong] = useState(false);
 
+  const fullLayout = flightplanFrameFull() || isFullLayoutSearch(searchStr);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the embed registry on while this route is mounted
   useEffect(() => {
+    if (fullLayout) return;
     setFlightplanEmbed(true);
     return () => setFlightplanEmbed(false);
-  }, []);
+  }, [fullLayout]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- flags a project list that stays empty
   useEffect(() => {
@@ -103,20 +108,21 @@ function EmbedTicketRoute() {
         if (!put.ok) throw new Error(`Thread-Zuordnung ${put.status}`);
         record = (await put.json()) as TicketThreadRecord;
       }
+      if (fullLayout) bindTicketThread(Number(ticketId), record.threadId);
       await navigate({
         to: "/$environmentId/$threadId",
         params: {
           environmentId: record.environmentId as EnvironmentId,
           threadId: record.threadId as ThreadId,
         },
-        search: { embed: "1" },
+        search: fullLayout ? { embed: undefined } : { embed: "1" },
         replace: true,
       });
     })().catch((cause: unknown) => {
       started.current = false;
       setError(cause instanceof Error ? cause.message : "Chat konnte nicht geöffnet werden.");
     });
-  }, [createThread, navigate, projects, ticketId]);
+  }, [createThread, fullLayout, navigate, projects, ticketId]);
 
   if (error) return <p data-fp-embed-error="true">{error}</p>;
   if (embedNoProject(projects, waitedTooLong)) {

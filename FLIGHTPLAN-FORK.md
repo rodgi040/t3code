@@ -42,6 +42,23 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     exporter (`configureClientTracing` in `apps/web/src/observability/clientTracing.ts`), so the chat proxy no longer
     sees `POST /chat/api/observability/v1/traces` (403). `VITE_T3CODE_DISABLE_CLIENT_TRACING=1|0` forces it off or on at
     build time. The server's own tracing is untouched.
+11. Full layout in the dashboard split (OP#1778): the switch is the query parameter `?layout=full` on the URL the parent
+    frames (`/chat/?layout=full`, `/chat/embed/<id>?layout=full`). It is read once per page load before the router starts
+    (`captureFrameLayout` in `apps/web/src/flightplan/embed.ts`, called from `installFlightplanChannel`), so in-app
+    navigation keeps it. With it the frame shows T3 as standalone: thread sidebar, header, settings; `isEmbedLocation` is
+    false and the embed route opens the ticket's thread without `?embed=1`. The sidebar turns into a sheet only below
+    600 px frame width instead of 768 px (`sidebarMobileQuery`, `html[data-fp-frame="full"]` rules in `index.css`), so
+    the thread list stays visible in a 1440 px window. Without the parameter (`/chat/embed/<id>` on the workplace page,
+    `?embed=1`) the compact embed layout stays as before. The Flightplan parts (ticket chip, comment box, history,
+    questions, start context) do not depend on the layout; in the full layout they belong only to the thread the parent
+    opened for the ticket (`bindTicketThread`, `ticketForThread` in `channel.ts`), so another thread or a new chat shows
+    nothing ticket-related. A query parameter was chosen over a parent message because it is known before the first
+    render and needs no handshake; the proxy allowlist matches `$uri` without the query, so no proxy change is needed.
+12. Thread report to the dashboard (OP#1778): in the full layout the chat posts `{type:"fp:thread", threadId,
+    ticketId}` to `http://localhost:8090` whenever the open thread or its title changes (`reportThread` in
+    `channel.ts`, called from `ChatView`). `ticketId` is the ticket the parent opened for that thread, else a ticket named
+    in the title (`Ticket #<id>`, `#<id> <Titel>`), else `null`. The dashboard moves its "Im Chat" mark with it. Repeats are
+    dropped; the compact embed and standalone pages send nothing.
 
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.
