@@ -16,7 +16,7 @@ import {
   ticketContextForDisplay,
   ticketThreadTitle,
   bindTicketThread,
-  threadMessage,
+  resolveThreadTicket,
   ticketForThread,
 } from "./channel";
 
@@ -432,16 +432,35 @@ describe("ticket bound to its thread in the dashboard split (OP#1778)", () => {
     expect(ticketForThread(getFlightplanChat(), "thread-a", true)).toBeNull();
   });
 
-  it("reports the open thread with its ticket, or a ticket named in the title", () => {
+  it("binds the context to the thread named in the parent's answer (OP#1784)", () => {
+    applyParentMessage(
+      { type: "fp:context", wp: { id: 1145, subject: "Rückfrage" }, threadId: "thread-x" },
+      PARENT_ORIGIN,
+    );
+    expect(ticketForThread(getFlightplanChat(), "thread-x", true)?.id).toBe(1145);
+    expect(ticketForThread(getFlightplanChat(), "thread-y", true)).toBeNull();
+    applyParentMessage(
+      { type: "fp:context", wp: { id: 1145, subject: "Rückfrage" }, threadId: "thread-y" },
+      "http://evil.example",
+    );
+    expect(ticketForThread(getFlightplanChat(), "thread-y", true)).toBeNull();
+  });
+
+  it("takes the ticket of a thread from the binding or the server record, never from the title alone", async () => {
     applyParentMessage({ type: "fp:context", wp: { id: 1778, subject: "Split" } }, PARENT_ORIGIN);
     bindTicketThread(1778, "thread-a");
-    expect(threadMessage(getFlightplanChat(), "thread-a", "Irgendwas")).toEqual({
-      type: "fp:thread",
-      threadId: "thread-a",
-      ticketId: 1778,
+    const records: Record<number, { threadId: string }> = { 1145: { threadId: "thread-b" } };
+    const lookup = vi.fn(async (id: number) => records[id] ?? null);
+    const chat = getFlightplanChat();
+    expect(await resolveThreadTicket(chat, "thread-a", "Irgendwas", lookup)).toBe(1778);
+    expect(await resolveThreadTicket(chat, "thread-b", "Ticket #1145", lookup)).toBe(1145);
+    expect(await resolveThreadTicket(chat, "thread-c", "#1145 Kopie", lookup)).toBeNull();
+    expect(await resolveThreadTicket(chat, "thread-d", "#1720 Titel", lookup)).toBeNull();
+    expect(await resolveThreadTicket(chat, "thread-e", "Kein Ticket 1720", lookup)).toBeNull();
+    expect(lookup).toHaveBeenCalledTimes(3);
+    const failing = vi.fn(async () => {
+      throw new Error("offline");
     });
-    expect(threadMessage(getFlightplanChat(), "thread-b", "Ticket #1145").ticketId).toBe(1145);
-    expect(threadMessage(getFlightplanChat(), "thread-c", "#1720 Titel").ticketId).toBe(1720);
-    expect(threadMessage(getFlightplanChat(), "thread-d", "Kein Ticket 1720").ticketId).toBeNull();
+    expect(await resolveThreadTicket(chat, "thread-b", "Ticket #1145", failing)).toBeNull();
   });
 });
