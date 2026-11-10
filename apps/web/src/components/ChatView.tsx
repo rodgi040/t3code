@@ -3599,6 +3599,7 @@ export default function ChatView(props: ChatViewProps) {
                     }
                   >
                     <FlightplanComposer
+                      threadId={threadId}
                       activeInstanceId={activeProviderInstanceId}
                       entries={providerInstanceEntries}
                       tokens={

@@ -1,3 +1,5 @@
+import { flightplanFrameFull } from "./embed";
+
 export const PARENT_ORIGIN = "http://localhost:8090";
 
 export interface FlightplanWorkPackage {
@@ -102,6 +104,8 @@ export interface FlightplanChatState {
   readonly eventsFor: number | null;
   readonly events: readonly FlightplanEvent[];
   readonly comment: FlightplanCommentStatus;
+  /** Flightplan OP#1778: thread the parent opened for the ticket (dashboard split, full layout). */
+  readonly ticketThread: { readonly ticketId: number; readonly threadId: string } | null;
 }
 
 const empty: FlightplanChatState = {
@@ -114,6 +118,7 @@ const empty: FlightplanChatState = {
   eventsFor: null,
   events: [],
   comment: { state: "idle" },
+  ticketThread: null,
 };
 let state: FlightplanChatState = empty;
 // Flightplan OP#1710: what was sent per question until the parent confirms it.
@@ -351,8 +356,31 @@ function sanitizeField(value: string, maxLength: number, keepNewlines: boolean):
   return clean.trim().slice(0, maxLength);
 }
 
-export function withTicketStartContext(text: string): string {
-  const wp = state.context;
+/**
+ * Flightplan OP#1778: the ticket that belongs to a thread. In the compact embed the frame shows one ticket's thread, so
+ * the context always applies. In the full layout the user can switch threads in the sidebar; the ticket applies only to
+ * the thread the parent opened for it, other threads show nothing ticket-related.
+ */
+export function ticketForThread(
+  chat: FlightplanChatState,
+  threadId: string | null | undefined,
+  full: boolean = flightplanFrameFull(),
+): FlightplanWorkPackage | null {
+  if (!chat.context) return null;
+  if (!full) return chat.context;
+  const bound = chat.ticketThread;
+  return bound && bound.ticketId === chat.context.id && bound.threadId === threadId
+    ? chat.context
+    : null;
+}
+
+export function bindTicketThread(ticketId: number, threadId: string): void {
+  state = { ...state, ticketThread: { ticketId, threadId } };
+  publish();
+}
+
+export function withTicketStartContext(text: string, threadId?: string | null): string {
+  const wp = ticketForThread(state, threadId);
   if (!wp) return text;
   const fields = [
     `Ticket #${Math.trunc(wp.id)}`,
@@ -438,6 +466,9 @@ export function subscribeFlightplanChat(listener: () => void): () => void {
 }
 
 export function installFlightplanChannel(target: Pick<Window, "addEventListener"> = window): void {
+  if (flightplanFrameFull() && typeof document !== "undefined") {
+    document.documentElement.dataset.fpFrame = "full";
+  }
   target.addEventListener("message", (event) => {
     applyParentMessage(event.data, event.origin);
   });

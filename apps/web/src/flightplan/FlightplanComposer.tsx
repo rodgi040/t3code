@@ -10,7 +10,9 @@ import {
   sendAnswer,
   sendComment,
   subscribeFlightplanChat,
+  ticketForThread,
 } from "./channel";
+import { flightplanFrameFull } from "./embed";
 import { HermesAvatar, isHermesInstance } from "./HermesAvatar";
 import { FLIGHTPLAN_TARGETS, modelForTarget } from "./targets";
 
@@ -167,19 +169,30 @@ function TicketComment({
 }
 
 export function FlightplanComposer({
+  threadId,
   activeInstanceId,
   entries,
   tokens,
   onSelect,
 }: {
+  readonly threadId: string | null;
   readonly activeInstanceId: string | null;
   readonly entries: readonly ModelEntry[];
   readonly tokens: TokenLine | null;
   readonly onSelect: (instanceId: ProviderInstanceId, model: string) => void;
 }) {
   const chat = useSyncExternalStore(subscribeFlightplanChat, getFlightplanChat, getFlightplanChat);
-  const chip = chat.context ? `#${chat.context.id} ${chat.context.subject}` : null;
-  const ticketId = chat.context?.id ?? null;
+  // Flightplan OP#1778: in the dashboard split only the ticket's own thread shows ticket parts.
+  const ticket = ticketForThread(chat, threadId);
+  const full = flightplanFrameFull();
+  const chip = ticket ? `#${ticket.id} ${ticket.subject}` : null;
+  const ticketId = ticket?.id ?? null;
+  const questions = full
+    ? chat.questions.filter((item) => item.work_package_id === ticketId)
+    : chat.questions;
+  const answered = full
+    ? chat.answered.filter((entry) => entry.workPackageId === ticketId)
+    : chat.answered;
   const lines =
     ticketId !== null && chat.eventsFor === ticketId
       ? chat.events.map((event) => ({ id: event.id, text: eventLine(event) }))
@@ -223,15 +236,10 @@ export function FlightplanComposer({
       ) : null}
       {/* Flightplan OP#1711 wave 2: ticket history (display only) and the comment box with confirmation. */}
       {ticketId !== null ? (
-        <TicketComment
-          key={ticketId}
-          wpId={ticketId}
-          title={chat.context?.subject ?? ""}
-          lines={lines}
-        />
+        <TicketComment key={ticketId} wpId={ticketId} title={ticket?.subject ?? ""} lines={lines} />
       ) : null}
       {/* Flightplan OP#1710: answered questions stay visible with the chosen answer. */}
-      {chat.answered.map((entry) => (
+      {answered.map((entry) => (
         <p
           key={`done-${entry.id}`}
           role="status"
@@ -243,7 +251,7 @@ export function FlightplanComposer({
           {entry.status ? `, Status jetzt ${entry.status}` : ""}
         </p>
       ))}
-      {chat.questions.map((item) => (
+      {questions.map((item) => (
         <form
           key={item.id}
           className="flex flex-col gap-1 rounded-md border p-2"
