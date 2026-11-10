@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { bindTicketThread } from "../flightplan/channel";
 import { flightplanFrameFull, isFullLayoutSearch, setFlightplanEmbed } from "../flightplan/embed";
-import { newThreadId } from "../lib/utils";
+import { newMessageId, newThreadId } from "../lib/utils";
 import { Button } from "../components/ui/button";
 import {
   useAllEnvironmentShellsBootstrapped,
@@ -19,6 +19,17 @@ interface TicketThreadRecord {
   readonly threadId: string;
   readonly environmentId: string;
   readonly projectId: string;
+  readonly created?: boolean;
+}
+
+/** Flightplan OP#1802: the first turn of a ticket's chat, sent when the dashboard opens the ticket for the first time. */
+function ticketStartPrompt(ticketId: string): string {
+  return [
+    `Ticket #${ticketId} wurde im ADA-Dashboard geöffnet.`,
+    "Fasse zuerst kurz den Stand zusammen: was erledigt ist, was offen ist.",
+    "Nenne danach die offenen Entscheidungen (was, wo, wie) und stelle deine Fragen dazu direkt hier im Chat.",
+    "Ändere dabei noch nichts, weder am Ticket noch am Code.",
+  ].join("\n");
 }
 
 const EMPTY_PROJECTS_TIMEOUT_MS = 8000;
@@ -56,6 +67,7 @@ function EmbedTicketRoute() {
   // Flightplan OP#1778: the dashboard split opens the ticket's thread in the full layout (sidebar, header).
   const searchStr = useLocation({ select: (location) => location.searchStr });
   const createThread = useOrchestrationCommand(threadEnvironment.create, { reportFailure: false });
+  const startTurn = useOrchestrationCommand(threadEnvironment.startTurn, { reportFailure: false });
   const started = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [waitedTooLong, setWaitedTooLong] = useState(false);
@@ -93,13 +105,14 @@ function EmbedTicketRoute() {
       }
       if (!record) {
         const threadId = newThreadId();
+        const modelSelection = claudeSelection(project);
         const created = await createThread({
           environmentId: project.environmentId,
           input: {
             threadId,
             projectId: project.id,
             title: `Ticket #${ticketId}`,
-            modelSelection: claudeSelection(project),
+            modelSelection,
             runtimeMode: "approval-required",
             interactionMode: "default",
             branch: null,
@@ -123,6 +136,24 @@ function EmbedTicketRoute() {
         });
         if (!put.ok) throw new Error(`Thread-Zuordnung ${put.status}`);
         record = (await put.json()) as TicketThreadRecord;
+        // OP#1802: only the dashboard starts the agent, and only for the thread this click created.
+        if (fullLayout && record.created && record.threadId === threadId) {
+          await startTurn({
+            environmentId: project.environmentId,
+            input: {
+              threadId,
+              message: {
+                messageId: newMessageId(),
+                role: "user",
+                text: ticketStartPrompt(ticketId),
+                attachments: [],
+              },
+              modelSelection,
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+            },
+          });
+        }
       }
       if (fullLayout) bindTicketThread(Number(ticketId), record.threadId);
       await navigate({
@@ -147,6 +178,7 @@ function EmbedTicketRoute() {
     replace,
     shells,
     shellsReady,
+    startTurn,
     ticketId,
   ]);
 
