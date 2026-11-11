@@ -202,5 +202,18 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     Ticket rule (OP#1838 block, only with `T3CODE_FP_ASSUMPTION_RULE=1`): the last sentence asks the agent to name instructions it
     does not follow (deleting, force push, ignoring rules) under "Offen" in the final statement.
 
+20. Slot limit for ticket threads (OP#1889): `apps/server/src/flightplan/slots.ts`, hooked into `ProviderTurnStartService.start`
+    right before the workspace and provider session are prepared. For a thread the mapping file assigns to a ticket, at most
+    `T3CODE_FP_SLOT_LIMIT` (default 4, `0` = off, invalid = 4) other mapped threads may be working. Working means the
+    projection shell's active run is `preparing`, `starting` or `running`; `waiting` (approval or input) and `queued` do not count.
+    Source: `listActiveShellIndex` plus `getThreadShell` of the mapped threads. A refused start settles the run as failed with an
+    error item ("Kein Platz frei", German text naming the busy tickets), which the thread shows in the chat; no queue, no restart,
+    the person sends again. Free chats and a thread that already has another working run (continuation) are not checked.
+    Race: runs are `starting` before this check, so a `starting` thread counts for a start only when it asked earlier
+    (request time, thread id as tie-break); of two simultaneous starts the later one is refused, never both. Reads are not one
+    transaction, so a start racing a status change can exceed the limit by at most one. A read error (map, store) lets the turn
+    start and logs a warning. The browser check in `channel.ts` keeps its constant 4; it does not follow the variable (no protocol
+    change). Server change: needs a restart of the t3-fp server.
+
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.
