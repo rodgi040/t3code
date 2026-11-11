@@ -201,6 +201,20 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     `fp-op ask`. Server change: needs a restart of the t3-fp server.
     Ticket rule (OP#1838 block, only with `T3CODE_FP_ASSUMPTION_RULE=1`): the last sentence asks the agent to name instructions it
     does not follow (deleting, force push, ignoring rules) under "Offen" in the final statement.
+20. Denial counter (OP#1890): each deny of the list (item 19) appends one JSON line to `<baseDir>/userdata/flightplan-denials.jsonl`
+    (mode 0600): `{at (UTC), threadId, ticket, tool, category, protected}`. The category is set where the reason arises (type
+    `Denial` in `denylist.ts`): `git-push-main`, `git-push-force`, `sudo`, `systemctl`, `docker`, `rm-ausserhalb`,
+    `schreibziel-geschuetzt`, `fp-op-doctor`, `zu-lang`, `pruefung-fehlgeschlagen`. `protected` is true for a protection target:
+    `main`/`master` push, Docker, token or credential paths (`.ssh`, `.config`, `.hermes`, `.claude`) and the Claude settings files.
+    No command text and no path from the command is stored; a write error is swallowed. The hook gets the thread ids and the mapping
+    file from `makeClaudeQueryOptions` (`ticketDenialLog`, set in `openQuery`; the ticket is looked up in the mapping at write time).
+    `GET /api/flightplan/denials` (read scope, same origin rules as the ticket endpoint, `denialsHttp.ts`) returns
+    `{ "<ticket>": { count, protected, maxInThread, lastCategory } }`. `fp:activity` carries the same object as the optional field
+    `denials: { [ticket]: { count, protected, maxInThread, lastCategory } }`; it is left out when there are no denials, so
+    receivers that do not know the field keep working (they ignore it) and a missing field means "no denials". The dashboard
+    (OpenProject module, OP#1890) shows a quiet pill "n gesperrt" and raises the inbox row to rank 1 only on `protected` or
+    `maxInThread >= 3`. **Limit:** while `t3-fp` runs as root, an agent can change or delete the file; the display is a hint,
+    not a security proof (OP#1845). Server change: needs a restart of the t3-fp server.
 
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.

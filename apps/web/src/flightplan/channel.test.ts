@@ -17,7 +17,10 @@ import {
   bindTicketThread,
   resolveThreadTicket,
   ticketForThread,
+  normalizeDenials,
+  reportActivity,
 } from "./channel";
+import { captureFrameLayout } from "./embed";
 
 describe("flightplan parent channel", () => {
   it("asks the parent for ticket context once the listener is up", () => {
@@ -454,5 +457,56 @@ describe("ticket bound to its thread in the dashboard split (OP#1778)", () => {
       throw new Error("offline");
     });
     expect(await resolveThreadTicket(chat, "thread-b", "Ticket #1145", failing)).toBeNull();
+  });
+});
+
+// Flightplan OP#1890
+describe("denials in fp:activity", () => {
+  const good = { count: 2, protected: true, maxInThread: 2, lastCategory: "docker" };
+  const shells = [{ id: "t-5001", title: "#5001 x", runtime: { status: "running" } }];
+  const lookup = async (ticketId: number) => ({ threadId: `t-${ticketId}` });
+
+  it("keeps well-formed entries and drops the rest", () => {
+    expect(
+      normalizeDenials({
+        "5001": good,
+        "5002": { count: 0 },
+        "5003": "x",
+        abc: good,
+        "5004": { count: 1 },
+      }),
+    ).toEqual({
+      "5001": good,
+      "5004": { count: 1, protected: false, maxInThread: 1, lastCategory: "" },
+    });
+    expect(normalizeDenials(null)).toEqual({});
+    expect(normalizeDenials([good])).toEqual({});
+  });
+
+  it("adds denials to the message and leaves the old fields unchanged", async () => {
+    captureFrameLayout(true, "?layout=full");
+    const sent: Record<string, unknown>[] = [];
+    const target = { postMessage: (m: unknown) => void sent.push(m as Record<string, unknown>) };
+    await reportActivity(shells, true, target, lookup, async () => ({ "5001": good }));
+    expect(sent[0]).toEqual({
+      type: "fp:activity",
+      v: 2,
+      tickets: [5001],
+      states: [{ ticket: 5001, threadId: "t-5001", state: "working" }],
+      denials: { "5001": good },
+    });
+  });
+
+  it("omits the field without denials, on a bad answer and on a failing endpoint", async () => {
+    captureFrameLayout(true, "?layout=full");
+    const sent: Record<string, unknown>[] = [];
+    const target = { postMessage: (m: unknown) => void sent.push(m as Record<string, unknown>) };
+    await reportActivity(shells, true, target, lookup, async () => ({}));
+    await reportActivity(shells, true, target, lookup, async () => "kaputt");
+    await reportActivity(shells, true, target, lookup, async () => {
+      throw new Error("offline");
+    });
+    expect(sent).toHaveLength(3);
+    for (const message of sent) expect("denials" in message).toBe(false);
   });
 });

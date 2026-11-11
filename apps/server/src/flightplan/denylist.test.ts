@@ -10,6 +10,7 @@ import {
   checkToolCall,
   checkToolCallWithBranches,
   denyMessage,
+  denialLogFile,
   denylistAppliesToThread,
   denylistEnabled,
   resetDenylistWarnings,
@@ -632,5 +633,98 @@ describe("denylist: simple variables in one command", () => {
     }
     // oxlint-disable-next-line t3code/no-wall-clock-in-tests -- see above
     expect(Date.now() - start).toBeLessThan(800);
+  });
+});
+
+// Flightplan OP#1890
+describe("denylist: denial log", () => {
+  const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "fp-denials-"));
+  const mapping = NodePath.join(dir, "flightplan-ticket-threads.json");
+  const uuid = "22222222-2222-4222-8222-222222222222";
+  NodeFS.writeFileSync(
+    mapping,
+    JSON.stringify({ "1890": { threadId: uuid, environmentId: "e", projectId: "p" } }),
+  );
+  const logFile = denialLogFile(mapping);
+  const hookFor = (target?: { ticketThreadsFile: string; threadIds: string[] }) => {
+    const hook = makeDenylistPreToolUseHook(CWD, undefined, target);
+    return (tool_name: string, tool_input: unknown) =>
+      hook(
+        {
+          hook_event_name: "PreToolUse",
+          tool_name,
+          tool_input,
+          tool_use_id: "t",
+          cwd: CWD,
+        } as never,
+        "t",
+        { signal: new AbortController().signal },
+      );
+  };
+  const lines = () =>
+    NodeFS.existsSync(logFile)
+      ? NodeFS.readFileSync(logFile, "utf8")
+          .split("\n")
+          .filter(Boolean)
+          .map((l) => JSON.parse(l) as Record<string, unknown>)
+      : [];
+
+  it("writes category, thread, ticket and protection flag, but never the command", async () => {
+    const run = hookFor({ ticketThreadsFile: mapping, threadIds: [uuid, "root"] });
+    await run("Bash", { command: "docker rm geheimer-container-name" });
+    await run("Bash", { command: "git push origin main" });
+    await run("Bash", { command: "git push --force origin feature/x" });
+    await run("Bash", { command: "sudo cat /root/streng-geheim" });
+    await run("Bash", { command: "systemctl stop nginx" });
+    await run("Bash", { command: "rm -rf /home/other/dir-x" });
+    await run("Bash", { command: "fp-op doctor" });
+    await run("Write", { file_path: "/root/.ssh/id_x" });
+    await run("Write", { file_path: "/etc/hosts" });
+    expect(await run("Bash", { command: "pnpm test" })).toEqual({});
+    const rows = lines();
+    expect(rows.map((r) => [r.category, r.protected])).toEqual([
+      ["docker", true],
+      ["git-push-main", true],
+      ["git-push-force", false],
+      ["sudo", false],
+      ["systemctl", false],
+      ["rm-ausserhalb", false],
+      ["fp-op-doctor", false],
+      ["schreibziel-geschuetzt", true],
+      ["schreibziel-geschuetzt", false],
+    ]);
+    for (const row of rows) {
+      expect(row.threadId).toBe(uuid);
+      expect(row.ticket).toBe("1890");
+      expect(typeof row.at).toBe("string");
+      expect(new Date(row.at as string).toISOString()).toBe(row.at);
+      expect(Object.keys(row).toSorted()).toEqual(
+        ["at", "category", "protected", "threadId", "ticket", "tool"].toSorted(),
+      );
+    }
+    const raw = NodeFS.readFileSync(logFile, "utf8");
+    for (const secret of ["geheimer-container-name", "streng-geheim", "dir-x", "id_x", "nginx"]) {
+      expect(raw).not.toContain(secret);
+    }
+    expect(NodeFS.statSync(logFile).mode & 0o777).toBe(0o600);
+  });
+
+  it("a write error does not change the verdict", async () => {
+    const blockedDir = NodePath.join(dir, "gibt-es-als-datei");
+    NodeFS.writeFileSync(blockedDir, "x");
+    const run = hookFor({
+      ticketThreadsFile: NodePath.join(blockedDir, "flightplan-ticket-threads.json"),
+      threadIds: [uuid],
+    });
+    expect(await run("Bash", { command: "sudo ls" })).toMatchObject({
+      hookSpecificOutput: { permissionDecision: "deny" },
+    });
+  });
+
+  it("logs nothing without a target and for allowed calls", async () => {
+    const before = lines().length;
+    await hookFor()("Bash", { command: "sudo ls" });
+    await hookFor({ ticketThreadsFile: mapping, threadIds: [uuid] })("Bash", { command: "ls" });
+    expect(lines()).toHaveLength(before);
   });
 });
