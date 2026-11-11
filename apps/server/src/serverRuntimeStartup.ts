@@ -1,3 +1,4 @@
+import { startWaitingFile } from "./flightplan/waitingFile.ts";
 import {
   CommandId,
   DEFAULT_MODEL,
@@ -564,6 +565,8 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
       ).pipe(Effect.map((targets): AutoBootstrapWelcomeTargets => targets)),
     });
     yield* Effect.logInfo("V2 orchestration recovery completed", recovery);
+    // Flightplan OP#1887: waiting ticket threads for readers without a browser (fail-open).
+    yield* startWaitingFile({ baseDir: serverConfig.baseDir, source: orchestrator });
     // Runs after activation: the status check fetches every enabled project's
     // remote, and awaiting it here held command readiness for that long.
     yield* runStartupPhase(
