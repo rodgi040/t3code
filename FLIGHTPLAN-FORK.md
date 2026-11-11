@@ -166,5 +166,24 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
       is not consumed and answers `gone` when the live watch no longer lists the request. The answer goes through `respondToApproval`/`respondToUserInput` with the explicit `threadId`;
       the chat's own hook (`usePendingThreadRequests`) is unchanged.
 
+19. Deny list for ticket threads (OP#1868): `apps/server/src/flightplan/denylist.ts`. For a thread the server maps to a ticket
+    (`flightplan-ticket-threads.json`, thread or root thread id) `makeClaudeQueryOptions` sets a `PreToolUse` hook
+    (`ticketDenylist`, decided in `openQuery` of `ClaudeAdapterV2.ts`; the flag is part of the live-query key). A hook deny comes
+    before the permission mode and `canUseTool`, so it holds in `auto`, `acceptEdits`, `bypassPermissions` and after the
+    `dontAsk` fallback; `disallowedTools` was not used because it only matches tool names or prefix rules. Free chats get no
+    hook. `T3CODE_FP_DENYLIST=0` switches it off (default on, only for ticket threads). Bash blocked: `git push` with
+    `--force`, `-f`, `--force-with-lease`, `+ref`, `--mirror` or target `main`/`master`; `sudo`; `systemctl` start, stop, restart,
+    reload, enable, disable, mask, unmask, daemon-reload, edit, kill (and a few like try-restart); `docker`/`docker compose` that
+    change things (run, exec, rm, rmi, stop, restart, kill, build, pull, up, down, start, create, push, network/volume/system
+    changes); `fp-op doctor`; recursive `rm` outside the session directory, on `~`, `/`, `$HOME` (any absolute path when the
+    directory is unknown). Read-only verbs (`status`, `ps`, `logs`, `inspect`, ...) stay free. Write, Edit, MultiEdit,
+    NotebookEdit are blocked for `/etc`, `/opt`, `/usr`, `/var/lib`, `/root/.claude|.ssh|.config`, `~/.claude|.ssh|.config|.hermes`,
+    `/home/*/.ssh|.config|.hermes` and `settings.json`/`settings.local.json` below a `.claude` folder. Chains (`;`, `&&`, `||`, `|`,
+    newline) are checked part by part, `env`/`nice`/`timeout`/`command`/`exec` prefixes are skipped. Limits: `sh -c`, `eval` and
+    `xargs` are re-parsed once, other wrappers (`python -c`, `node -e`, `ssh`, `find -exec`) are only searched for the core patterns as
+    text; scripts, variables, aliases, `mv`/`cp`/`tee`/redirects into protected paths and symlinks are not seen. It stops the
+    straight path, not a deliberate bypass (OP#1845 does that). The message tells the agent to ask with `fp-op ask`. Server change:
+    needs a restart of the t3-fp server.
+
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.

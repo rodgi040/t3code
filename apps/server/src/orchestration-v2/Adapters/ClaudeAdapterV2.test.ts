@@ -269,6 +269,19 @@ describe("ClaudeAdapterV2 runtime query policy", () => {
     assert.isUndefined(options.extraArgs?.["dangerously-skip-permissions"]);
   });
 
+  it("sets the Flightplan deny-list PreToolUse hook only for ticket threads", () => {
+    const base = {
+      modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+      nativeThreadId: "native-denylist",
+      resume: false,
+      cwd: "/workspace",
+      permissionMode: "auto" as const,
+    };
+    const ticket = ClaudeAdapterV2.makeClaudeQueryOptions({ ...base, ticketDenylist: true });
+    assert.lengthOf(ticket.hooks?.PreToolUse ?? [], 1);
+    assert.isUndefined(ClaudeAdapterV2.makeClaudeQueryOptions(base).hooks);
+  });
+
   it("passes every --add-dir launch directory to Claude", () => {
     const options = ClaudeAdapterV2.makeClaudeQueryOptions({
       modelSelection: CLAUDE_TEST_MODEL_SELECTION,
