@@ -59,6 +59,43 @@ describe("flightplan prompt", () => {
     expect(traced[0]?.[1]).toBe("thread-1");
   });
 
+  // OP#1838
+  it("adds the assumption rule with the ticket number, only with the first turn", async () => {
+    const args = {
+      driver: "claudeAgent",
+      run: async (id: string) => ({ id, ok: true, body: "x" }),
+      trace: async (id: string) => id,
+    };
+    const first = await enrichFlightplanPrompt({ ...args, text: "Arbeite an #1838", firstTurn: true });
+    expect(first).toContain("fp-op assume 1838 --text");
+    expect(first).toContain("fp-op result 1838 --stdin");
+    expect(first).toContain("Es darf nur eine Annahme offen sein");
+    expect(first).toContain("merge nicht");
+    for (const topic of [
+      "Deploy, Release, Einspielen",
+      "Host, Docker, Firewall, SSH, Ports, DNS",
+      "Secrets und Rotation",
+      "Löschen und alles Unumkehrbare",
+      "Geld, Budget, Modellwahl",
+      "Kunden, Versand, Verträge",
+      "Scope und Priorität",
+      "Architektur und Zuständigkeit",
+      "Prüfer-Befunde",
+      "Überspringen eines Gates",
+    ]) {
+      expect(first).toContain(topic);
+    }
+    const later = await enrichFlightplanPrompt({ ...args, text: "Weiter mit #1838", firstTurn: false });
+    expect(later).not.toContain("fp-op assume");
+    const other = await enrichFlightplanPrompt({
+      ...args,
+      driver: "acpRegistry",
+      text: "Arbeite an #1838",
+      firstTurn: true,
+    });
+    expect(other).not.toContain("fp-op assume");
+  });
+
   it("passes slash commands through unchanged, on any turn", async () => {
     const calls: string[] = [];
     for (const firstTurn of [true, false]) {

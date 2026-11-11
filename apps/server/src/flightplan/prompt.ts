@@ -44,9 +44,22 @@ function withTicketContext(
   return `${text}\n\n${extra}`;
 }
 
-function withClaudeHint(text: string, driver: string): string {
+// Flightplan OP#1838: decide inside the approved plan, record the assumption on the ticket, ask about reserved topics.
+export function assumptionRule(ticket: string): string {
+  return [
+    "Regeln für Entscheidungen in diesem Ticket:",
+    "- Entscheidungen innerhalb des freigegebenen Plans und Scopes des Tickets triffst du selbst. Frag dafür nicht nach.",
+    `- Halte jede solche Entscheidung, die der Mensch anders sehen könnte, als Annahme fest: fp-op assume ${ticket} --text "…". Es darf nur eine Annahme offen sein; ist schon eine offen (Exit 2), stell eine Rückfrage statt einer zweiten Annahme.`,
+    "- Solange eine Annahme offen ist: arbeite nur in deinem Branch und merge nicht.",
+    "- Immer Rückfrage an den Menschen, nie Annahme: Deploy, Release, Einspielen; Host, Docker, Firewall, SSH, Ports, DNS; Secrets und Rotation; Löschen und alles Unumkehrbare; Geld, Budget, Modellwahl; Kunden, Versand, Verträge; Scope und Priorität; Architektur und Zuständigkeit; Prüfer-Befunde; Überspringen eines Gates.",
+    `- Am Ende der Arbeit: fp-op result ${ticket} --stdin mit den Abschnitten Geändert, Geprüft, Offen.`,
+  ].join("\n");
+}
+
+function withClaudeHint(text: string, driver: string, ticket?: string): string {
   if (driver !== "claudeAgent" || text.includes("CLI fp-op")) return text;
-  return `${text}\n\nTicket actions in this session go through the CLI fp-op (host tool, docs/agents/fp-op.md).`;
+  const hint = `${text}\n\nTicket actions in this session go through the CLI fp-op (host tool, docs/agents/fp-op.md).`;
+  return ticket ? `${hint}\n\n${assumptionRule(ticket)}` : hint;
 }
 
 function runFpOp(id: string): Promise<{ id: string; ok: boolean; body: string }> {
@@ -146,6 +159,6 @@ export async function enrichFlightplanPrompt(input: {
   const traceId = marked.traceId ?? NodeCrypto.randomUUID();
   const opened = await (input.trace ?? openClaudeTrace)(traceId, input.threadId);
   if (!input.firstTurn) return text;
-  const hinted = withClaudeHint(text, input.driver);
+  const hinted = withClaudeHint(text, input.driver, ids[0]);
   return opened ? `${hinted}\n\nTrace: ${opened}` : hinted;
 }
