@@ -171,5 +171,36 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
       is not consumed and answers `gone` when the live watch no longer lists the request. The answer goes through `respondToApproval`/`respondToUserInput` with the explicit `threadId`;
       the chat's own hook (`usePendingThreadRequests`) is unchanged.
 
+19. Deny list for ticket threads (OP#1868): `apps/server/src/flightplan/denylist.ts`. For a thread the server maps to a ticket
+    (`flightplan-ticket-threads.json`, thread or root thread id) `makeClaudeQueryOptions` sets a `PreToolUse` hook
+    (`ticketDenylist`, decided in `openQuery` of `ClaudeAdapterV2.ts`; the flag is part of the live-query key). A hook deny comes
+    before the permission mode and `canUseTool`, so it holds in `auto`, `acceptEdits`, `bypassPermissions` and after the
+    `dontAsk` fallback; `disallowedTools` was not used because it only matches tool names or prefix rules. Free chats get no
+    hook. `T3CODE_FP_DENYLIST=0` switches it off (default on, only for ticket threads). A mapping file that cannot be parsed
+    turns the list off for all threads and logs one warning per process (a missing file is silent). Bash blocked: `git push` with
+    `--force`, `-f`, `--force-with-lease`, `+ref`, `--mirror` or target `main`/`master`, and a bare `git push` / `git push origin HEAD`
+    while the hook finds `main`/`master` checked out (`git symbolic-ref` in the effective directory, `git -C` and literal `cd` followed;
+    unknown branch is free); `sudo`; `systemctl` and `service` start, stop, restart, reload, enable, disable, mask, unmask,
+    daemon-reload, edit, kill (and a few like try-restart); `docker`/`docker compose` that change things (run, exec, rm, rmi, stop,
+    restart, kill, build, pull, up, down, start, create, push, network/volume/system changes); `fp-op doctor` (only as the first
+    word after `fp-op`); recursive `rm` outside the session directory, `/tmp`, `/var/tmp` and `/root/.local/state/flightplan/worktrees/`
+    (strict subpaths only, never the root itself, a pattern in the first component below `/tmp` etc. such as `/tmp/*` is refused, a sibling worktree by full name is allowed on purpose, `$TMPDIR` counts as `/tmp`, other variables are not checkable); a relative
+    target is refused when the effective directory is unknown (`cd -`, `cd` alone, `cd $X`); writes into the protected paths below by
+    `>`, `>>`, `&>`, `tee`, `cp`/`mv`/`install`/`ln`/`rsync` (destination, `mv` also the source), `sed -i`, `chmod`, `chown`, `touch`,
+    `mkdir`, `truncate`, `dd of=`, `rm`, `find -delete`. Read-only verbs (`status`, `ps`, `logs`, `inspect`, ...) and reads of
+    protected paths stay free. Write, Edit, MultiEdit, NotebookEdit are blocked for `/etc`, `/opt`, `/usr`, `/var/lib`,
+    `/root/.claude|.ssh|.config`, `~/.claude|.ssh|.config|.hermes`, `/home/*/.ssh|.config|.hermes` and `settings.json`/
+    `settings.local.json` below a `.claude` folder. Chains (`;`, `&&`, `||`, `|`, newline) are checked part by part, `env`/`nice`/
+    `timeout`/`command`/`exec` prefixes are skipped. `find -exec CMD`, `xargs CMD`, `ssh host CMD`, `watch CMD` check CMD as a command
+    (`{}` stands for each search path). `sh -c`, `bash -c`, `eval` are parsed once more; the code text of those and of `python -c`,
+    `node|bun -e|-p`, `perl|ruby -e`, `php -r` is scanned word by word for the core commands (at most 64 KB, longer text is refused
+    with "Befehlstext zu lang für die Sperrlisten-Prüfung; kürzer fassen"); other text (`grep "docker run"`, `bun run docker build`)
+    is never searched. Simple assignments in the same command are followed like `cd` (`VAR=/path`, `VAR=$(mktemp -d ...)`, `VAR=$(pwd)`, also behind `export`/`local`, replaced in `rm`, redirects, `cp`/`mv` and `cd` before the path check; unknown names stay unchecked and are refused; a subshell assignment counts as global). A command with more than 8 different `git -C` directories is refused. Limits: scripts (`bash x.sh`, `python x.py`), variables, aliases, `$(...)` in double quotes outside the
+    wrappers above, base64, a subshell `cd` meant to stay local, symlinks, interpreter file writes and remote tools (`gh`, `curl`)
+    are not seen. It stops the straight path, not a deliberate bypass (OP#1845 does that). The message tells the agent to ask with
+    `fp-op ask`. Server change: needs a restart of the t3-fp server.
+    Ticket rule (OP#1838 block, only with `T3CODE_FP_ASSUMPTION_RULE=1`): the last sentence asks the agent to name instructions it
+    does not follow (deleting, force push, ignoring rules) under "Offen" in the final statement.
+
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.

@@ -147,6 +147,8 @@ import {
   type CompiledClaudeModelSelection,
 } from "../../claudeModelOptions.ts";
 import * as ServerConfig from "../../config.ts";
+import { denylistAppliesToThread, makeDenylistPreToolUseHook } from "../../flightplan/denylist.ts";
+import { ticketThreadFile } from "../../flightplan/ticketThreads.ts";
 import * as PortScanner from "../../preview/PortScanner.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
@@ -1502,6 +1504,8 @@ export function makeClaudeQueryOptions(input: {
   readonly onElicitation?: ClaudeQueryOptions["onElicitation"];
   readonly supportedDialogKinds?: ClaudeQueryOptions["supportedDialogKinds"];
   readonly allowDangerouslySkipPermissions?: boolean;
+  /** Flightplan OP#1868: ticket thread, so a PreToolUse hook enforces the deny list in every permission mode. */
+  readonly ticketDenylist?: boolean;
   readonly appendSystemPromptFileText?: string;
   // Flag settings, because a user's settings.json env beats the process env in Claude Code.
   readonly toolSearchOverride?: "true";
@@ -1622,8 +1626,17 @@ export function makeClaudeQueryOptions(input: {
         ...launchAppendSystemPrompt,
       ].join("\n\n"),
     },
-    ...(deviceInstructions
-      ? { hooks: { SubagentStart: [{ hooks: [subagentDeviceInstructions] }] } }
+    ...(deviceInstructions || input.ticketDenylist === true
+      ? {
+          hooks: {
+            ...(deviceInstructions
+              ? { SubagentStart: [{ hooks: [subagentDeviceInstructions] }] }
+              : {}),
+            ...(input.ticketDenylist === true
+              ? { PreToolUse: [{ hooks: [makeDenylistPreToolUseHook(input.cwd)] }] }
+              : {}),
+          },
+        }
       : {}),
     ...(Object.keys(extraArgs).length === 0 ? {} : { extraArgs }),
   };
@@ -4514,6 +4527,8 @@ export interface ClaudeAdapterV2Options {
   readonly settings: ClaudeSettings;
   readonly environment: NodeJS.ProcessEnv;
   readonly attachmentsDir: string;
+  /** Flightplan OP#1868: ticket-thread mapping file; unset means no deny list. */
+  readonly ticketThreadsFile?: string;
   readonly fileSystem: FileSystem.FileSystem;
   readonly path: Path.Path;
   readonly crypto: Crypto.Crypto;
@@ -10139,7 +10154,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               ? {}
               : { allowedTools: queryPolicy.allowedTools }),
           });
-          const queryPolicyKey = claudeEffectiveQueryPolicyKey(queryPolicy, mcpOverrides);
+          const ticketDenylist = denylistAppliesToThread(adapterOptions.ticketThreadsFile, [
+            turnInput.threadId,
+            turnInput.appThread.lineage.rootThreadId,
+          ]);
+          const queryPolicyKey =
+            claudeEffectiveQueryPolicyKey(queryPolicy, mcpOverrides) +
+            (ticketDenylist ? "|fp-denylist" : "");
           const compiledSelection = compileClaudeModelSelection(turnInput.modelSelection);
           const resumeSessionAt = yield* getNativeConversationHeadId(turnInput.providerThread);
           const existing = yield* Ref.get(queryContext);
@@ -10285,6 +10306,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               : {
                   allowDangerouslySkipPermissions: queryPolicy.allowDangerouslySkipPermissions,
                 }),
+            ...(ticketDenylist ? { ticketDenylist } : {}),
             canUseTool,
             onUserDialog,
             onElicitation,
@@ -11568,6 +11590,7 @@ export const createClaudeAdapterV2 = Effect.fn("ClaudeAdapterV2Driver.create")(
       settings: { ...config, enabled, binaryPath },
       environment: claudeEnvironment,
       attachmentsDir: serverConfig.attachmentsDir,
+      ticketThreadsFile: ticketThreadFile(serverConfig.baseDir),
       fileSystem,
       path,
       crypto,

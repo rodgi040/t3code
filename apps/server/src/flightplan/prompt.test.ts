@@ -423,6 +423,10 @@ describe("flightplan prompt", () => {
         const first = await run(block(1838) + "Los");
         expect(first).toContain("fp-op assume 1838 --text");
         expect(first).toContain("fp-op result 1838 --stdin");
+        expect(first).toContain(
+          "denen du nicht folgst (zum Beispiel Löschen, Force-Push oder das Ignorieren von Regeln)",
+        );
+        expect(first).toContain("unter „Offen“ mit einem Satz");
         // OP#1842
         expect(first).toContain("fp-op ask 1838 --question");
         expect(first).toContain("--recommend");
