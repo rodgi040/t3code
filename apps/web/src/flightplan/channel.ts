@@ -176,8 +176,25 @@ export function applyParentMessage(data: unknown, origin: string): boolean {
     items?: unknown;
     threadId?: unknown;
   };
-  if (message.type === "fp:answered")
-    return applyAnswered(data as Partial<FlightplanAnsweredMessage>);
+  if (message.type === "fp:answered") {
+    const shown = applyAnswered(data as Partial<FlightplanAnsweredMessage>);
+    // Flightplan OP#1840: new fields ticket/answer continue the ticket's thread; without them it stays display only.
+    const continuation = parseAnswerContinuation(data);
+    if (continuation) void forwardAnswer(continuation);
+    return shown;
+  }
+  if (message.type === "fp:start") {
+    const ticket = positiveTicket((data as { ticket?: unknown }).ticket);
+    if (ticket === null) return false;
+    void handleStart(ticket);
+    return true;
+  }
+  if (message.type === "fp:assumption") {
+    const assumption = parseAssumption(data);
+    if (!assumption) return false;
+    void forwardAssumption(assumption);
+    return true;
+  }
   if (message.type === "fp:events")
     return applyEvents(data as { wpId?: unknown; events?: unknown });
   if (message.type === "fp:commented")
@@ -482,6 +499,19 @@ export function shellIsWorking(shell: Omit<ActivityShell, "id" | "title">): bool
 
 const verifiedThreadTickets = new Map<string, number>();
 
+async function verifiedTicket(
+  chat: FlightplanChatState,
+  shell: ActivityShell,
+  lookup: TicketThreadLookup,
+): Promise<number | null> {
+  const ticketId =
+    verifiedThreadTickets.get(shell.id) ??
+    (await resolveThreadTicket(chat, shell.id, shell.title, lookup));
+  if (!ticketId) return null;
+  verifiedThreadTickets.set(shell.id, ticketId);
+  return ticketId;
+}
+
 /** The tickets whose thread has an agent turn in flight; a title alone never counts (see resolveThreadTicket). */
 export async function workingTickets(
   chat: FlightplanChatState,
@@ -491,20 +521,57 @@ export async function workingTickets(
   const tickets = new Set<number>();
   for (const shell of shells) {
     if (!shellIsWorking(shell)) continue;
-    const ticketId =
-      verifiedThreadTickets.get(shell.id) ??
-      (await resolveThreadTicket(chat, shell.id, shell.title, lookup));
-    if (!ticketId) continue;
-    verifiedThreadTickets.set(shell.id, ticketId);
-    tickets.add(ticketId);
+    const ticketId = await verifiedTicket(chat, shell, lookup);
+    if (ticketId) tickets.add(ticketId);
   }
   return [...tickets].sort((a, b) => a - b);
+}
+
+// Flightplan OP#1834: fp:activity v2 names the state per ticket. Resting threads have none.
+export type ActivityState = "approval" | "input" | "error" | "working";
+const ACTIVITY_RANK: readonly ActivityState[] = ["approval", "input", "error", "working"];
+// The latest run failed (runtime.status, like the sidebar's "failed" dot). An interrupted run (e.g. /goal clear) is not an error.
+const ERROR_STATUSES: ReadonlySet<string> = new Set(["failed"]);
+
+export function shellActivityState(
+  shell: Omit<ActivityShell, "id" | "title">,
+): ActivityState | null {
+  if (shell.hasPendingApprovals) return "approval";
+  if (shell.hasPendingUserInput) return "input";
+  const status = shell.runtime?.status ?? "idle";
+  if (ERROR_STATUSES.has(status)) return "error";
+  return WORKING_STATUSES.has(status) ? "working" : null;
+}
+
+export interface TicketActivityState {
+  readonly ticket: number;
+  readonly threadId: string;
+  readonly state: ActivityState;
+}
+
+/** One entry per ticket-thread that is not resting; the ticket's highest-ranked state wins. Same server mapping as workingTickets. */
+export async function ticketActivityStates(
+  chat: FlightplanChatState,
+  shells: ReadonlyArray<ActivityShell>,
+  lookup: TicketThreadLookup = readTicketThreadRecord,
+): Promise<TicketActivityState[]> {
+  const byTicket = new Map<number, TicketActivityState>();
+  for (const shell of shells) {
+    const state = shellActivityState(shell);
+    if (!state) continue;
+    const ticket = await verifiedTicket(chat, shell, lookup);
+    if (!ticket) continue;
+    const known = byTicket.get(ticket);
+    if (known && ACTIVITY_RANK.indexOf(known.state) <= ACTIVITY_RANK.indexOf(state)) continue;
+    byTicket.set(ticket, { ticket, threadId: shell.id, state });
+  }
+  return [...byTicket.values()].sort((a, b) => a.ticket - b.ticket);
 }
 
 let lastActivityReport = "";
 let activityReportSeq = 0;
 
-/** Flightplan OP#1802: tells the dashboard which tickets an agent is working on right now (fp:activity). */
+/** Flightplan OP#1802/OP#1834: tells the dashboard which tickets an agent works on (tickets) and each ticket's state (states, v2). */
 export async function reportActivity(
   shells: ReadonlyArray<ActivityShell>,
   repeat = false,
@@ -517,11 +584,459 @@ export async function reportActivity(
   if (!target || !flightplanFrameFull()) return;
   const seq = ++activityReportSeq;
   const tickets = await workingTickets(state, shells, lookup);
+  const states = await ticketActivityStates(state, shells, lookup);
   if (seq !== activityReportSeq) return;
-  const key = tickets.join(",");
+  const message = { type: "fp:activity", v: 2, tickets, states };
+  const key = JSON.stringify(message);
   if (!repeat && key === lastActivityReport) return;
   lastActivityReport = key;
-  target.postMessage({ type: "fp:activity", tickets }, PARENT_ORIGIN);
+  target.postMessage(message, PARENT_ORIGIN);
+}
+
+// Flightplan OP#1840: background start and continuation of ticket threads (fp:start, fp:answered, fp:assumption).
+
+/** Contract Phase 2a: at most this many ticket threads work at the same time; fp:start refuses a fifth. */
+export const TICKET_SLOT_LIMIT = 4;
+/** Longest text from a parent message that goes into a turn (answer, assumption text, note). */
+export const TURN_TEXT_MAX_LENGTH = 4000;
+// A thread just started may not show as working yet; it keeps its slot for this long.
+const RECENT_START_MS = 15_000;
+const FORWARDED_MAX = 200;
+const ANSWER_STORE_KEY = "fp:answered-forwarded";
+const ASSUMPTION_STORE_KEY = "fp:assumption-forwarded";
+const BUSY_STATUSES: ReadonlySet<string> = new Set([...WORKING_STATUSES, "waiting"]);
+
+export type StartReason = "slots" | "running" | "error";
+
+export interface FlightplanStartedMessage {
+  readonly type: "fp:started";
+  readonly ticket: number;
+  readonly threadId: string | null;
+  readonly result: "accepted" | "rejected";
+  readonly reason: StartReason | null;
+}
+
+/**
+ * What the chat frame offers the channel for turns. The route layer (FlightplanActivity) registers it; the channel
+ * itself stays free of React and orchestration imports.
+ */
+export interface TicketTurnHost {
+  /** False until all environments delivered their thread shells; before that nothing is counted or sent. */
+  readonly ready: () => boolean;
+  /** The current thread shells (all threads, not only the open one). */
+  readonly shells: () => ReadonlyArray<ActivityShell>;
+  /** Creates a thread for the ticket, secures the server record and sends the start turn. Does not navigate. */
+  readonly startNew: (ticket: number) => Promise<string>;
+  /** Sends the start turn into an existing, resting thread of the ticket. */
+  readonly startExisting: (threadId: string, ticket: number) => Promise<boolean>;
+  /** Sends a user turn into a thread with the model and mode the thread last ran with. */
+  readonly sendTurn: (threadId: string, text: string) => Promise<boolean>;
+}
+
+interface TurnDeps {
+  readonly host?: TicketTurnHost | null;
+  readonly target?: Pick<Window, "postMessage"> | null;
+  readonly lookup?: TicketThreadLookup;
+  readonly storage?: Pick<Storage, "getItem" | "setItem"> | null;
+  readonly now?: () => number;
+}
+
+let turnHost: TicketTurnHost | null = null;
+const startsInFlight = new Map<number, number>();
+
+export function setTicketTurnHost(host: TicketTurnHost | null): void {
+  turnHost = host;
+}
+
+/** For tests: forgets in-flight starts. */
+export function resetTicketStarts(): void {
+  startsInFlight.clear();
+}
+
+function positiveTicket(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function defaultTarget(): Pick<Window, "postMessage"> | null {
+  return typeof window !== "undefined" && window.parent !== window ? window.parent : null;
+}
+
+function defaultStorage(): Pick<Storage, "getItem" | "setItem"> | null {
+  try {
+    return typeof sessionStorage !== "undefined" ? sessionStorage : null;
+  } catch {
+    return null;
+  }
+}
+
+function readSeen(storage: Pick<Storage, "getItem"> | null, key: string): number[] {
+  try {
+    const parsed: unknown = JSON.parse(storage?.getItem(key) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((id): id is number => typeof id === "number") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSeen(storage: Pick<Storage, "setItem"> | null, key: string, ids: number[]): void {
+  try {
+    storage?.setItem(key, JSON.stringify(ids.slice(-FORWARDED_MAX)));
+  } catch {
+    // A full or blocked sessionStorage only weakens the duplicate guard.
+  }
+}
+
+/** True when the id is new and now remembered; false for a repeat. The mark is set before any await. */
+function claimOnce(storage: Pick<Storage, "getItem" | "setItem"> | null, key: string, id: number) {
+  const seen = readSeen(storage, key);
+  if (seen.includes(id)) return false;
+  writeSeen(storage, key, [...seen, id]);
+  return true;
+}
+
+function releaseOnce(
+  storage: Pick<Storage, "getItem" | "setItem"> | null,
+  key: string,
+  id: number,
+) {
+  writeSeen(
+    storage,
+    key,
+    readSeen(storage, key).filter((entry) => entry !== id),
+  );
+}
+
+function shellBusy(shell: ActivityShell): boolean {
+  return (
+    BUSY_STATUSES.has(shell.runtime?.status ?? "idle") ||
+    Boolean(shell.hasPendingApprovals) ||
+    Boolean(shell.hasPendingUserInput)
+  );
+}
+
+function shellAwaitsHuman(shell: ActivityShell): boolean {
+  return Boolean(shell.hasPendingApprovals) || Boolean(shell.hasPendingUserInput);
+}
+
+/** The thread the server assigns to the ticket (never the title), or null. */
+async function assignedThreadId(
+  ticket: number,
+  lookup: TicketThreadLookup,
+): Promise<string | null> {
+  const record = await lookup(ticket).catch(() => null);
+  return typeof record?.threadId === "string" && record.threadId ? record.threadId : null;
+}
+
+function replyStarted(
+  target: Pick<Window, "postMessage"> | null,
+  ticket: number,
+  result: "accepted" | "rejected",
+  threadId: string | null,
+  reason: StartReason | null,
+): void {
+  const message: FlightplanStartedMessage = {
+    type: "fp:started",
+    ticket,
+    threadId,
+    result,
+    reason,
+  };
+  target?.postMessage(message, PARENT_ORIGIN);
+}
+
+function activeStartTickets(now: number): Set<number> {
+  for (const [ticket, at] of startsInFlight) {
+    if (now - at > RECENT_START_MS) startsInFlight.delete(ticket);
+  }
+  return new Set(startsInFlight.keys());
+}
+
+/**
+ * Flightplan OP#1840: fp:start. Creates (or reuses the resting) thread of the ticket and sends the start turn without
+ * changing the visible view. Answers with fp:started.
+ */
+export async function handleStart(ticket: number, deps: TurnDeps = {}): Promise<void> {
+  const host = deps.host === undefined ? turnHost : deps.host;
+  const target = deps.target === undefined ? defaultTarget() : deps.target;
+  const lookup = deps.lookup ?? readTicketThreadRecord;
+  const now = (deps.now ?? Date.now)();
+  const reply = (
+    result: "accepted" | "rejected",
+    threadId: string | null,
+    reason: StartReason | null,
+  ) => replyStarted(target, ticket, result, threadId, reason);
+  if (!host || !host.ready()) return reply("rejected", null, "error");
+  if (activeStartTickets(now).has(ticket)) return reply("rejected", null, "running");
+  startsInFlight.set(ticket, now);
+  let accepted = false;
+  try {
+    const shells = host.shells();
+    const assigned = await assignedThreadId(ticket, lookup);
+    const shell = assigned ? shells.find((item) => item.id === assigned) : undefined;
+    if (assigned && !shell) return reply("rejected", null, "error");
+    if (shell && shellBusy(shell)) return reply("rejected", assigned, "running");
+    const working = new Set(
+      (await ticketActivityStates(state, shells, lookup))
+        .filter((entry) => entry.state === "working")
+        .map((entry) => entry.ticket),
+    );
+    for (const other of activeStartTickets(now)) if (other !== ticket) working.add(other);
+    if (working.size >= TICKET_SLOT_LIMIT) return reply("rejected", null, "slots");
+    if (shell) {
+      if (!(await host.startExisting(shell.id, ticket)))
+        return reply("rejected", shell.id, "error");
+      accepted = true;
+      return reply("accepted", shell.id, null);
+    }
+    const threadId = await host.startNew(ticket);
+    accepted = true;
+    return reply("accepted", threadId, null);
+  } catch (error) {
+    // Another tab claimed the ticket first; its thread is the one that runs.
+    if (error instanceof Error && error.name === "TicketThreadClaimLostError") {
+      return reply("rejected", null, "running");
+    }
+    return reply("rejected", null, "error");
+  } finally {
+    if (!accepted) startsInFlight.delete(ticket);
+  }
+}
+
+export type ForwardKind = "answer" | "assumption";
+export type ForwardResult = "sent" | "pending" | "no-thread";
+
+export interface FlightplanForwardedMessage {
+  readonly type: "fp:forwarded";
+  readonly kind: ForwardKind;
+  readonly id: number;
+  readonly ticket: number;
+  readonly result: ForwardResult;
+}
+
+interface PendingForward {
+  readonly kind: ForwardKind;
+  readonly id: number;
+  readonly ticket: number;
+  readonly text: string;
+  readonly at: number;
+}
+
+const PENDING_STORE_KEY = "fp:forward-pending";
+export const PENDING_FORWARD_MAX = 20;
+export const PENDING_FORWARD_TTL_MS = 24 * 60 * 60 * 1000;
+const SENT_KEYS: Record<ForwardKind, string> = {
+  answer: ANSWER_STORE_KEY,
+  assumption: ASSUMPTION_STORE_KEY,
+};
+const forwardsInFlight = new Set<string>();
+
+function readPending(storage: Pick<Storage, "getItem"> | null, now: number): PendingForward[] {
+  try {
+    const parsed: unknown = JSON.parse(storage?.getItem(PENDING_STORE_KEY) ?? "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (entry): entry is PendingForward =>
+        entry !== null &&
+        typeof entry === "object" &&
+        (entry.kind === "answer" || entry.kind === "assumption") &&
+        positiveTicket(entry.id) !== null &&
+        positiveTicket(entry.ticket) !== null &&
+        typeof entry.text === "string" &&
+        typeof entry.at === "number" &&
+        now - entry.at < PENDING_FORWARD_TTL_MS,
+    );
+  } catch {
+    return [];
+  }
+}
+
+function writePending(storage: Pick<Storage, "setItem"> | null, entries: PendingForward[]): void {
+  try {
+    storage?.setItem(PENDING_STORE_KEY, JSON.stringify(entries.slice(-PENDING_FORWARD_MAX)));
+  } catch {
+    // Without sessionStorage a pending forward is lost on reload; the report to the parent still says pending.
+  }
+}
+
+function postForwarded(
+  target: Pick<Window, "postMessage"> | null,
+  entry: Pick<PendingForward, "kind" | "id" | "ticket">,
+  result: ForwardResult,
+): void {
+  const message: FlightplanForwardedMessage = {
+    type: "fp:forwarded",
+    kind: entry.kind,
+    id: entry.id,
+    ticket: entry.ticket,
+    result,
+  };
+  target?.postMessage(message, PARENT_ORIGIN);
+}
+
+/**
+ * One delivery attempt. "pending": threads not loaded, host not registered, the thread waits for approval or input, or
+ * the send failed. The turn is queued behind a running turn (dispatchMode queue), never steered into it.
+ */
+async function deliver(
+  entry: PendingForward,
+  host: TicketTurnHost | null,
+  lookup: TicketThreadLookup,
+  storage: Pick<Storage, "getItem" | "setItem"> | null,
+): Promise<ForwardResult> {
+  if (!host || !host.ready()) return "pending";
+  const threadId = await assignedThreadId(entry.ticket, lookup);
+  const shell = threadId ? host.shells().find((item) => item.id === threadId) : undefined;
+  if (!threadId || !shell) return "no-thread";
+  if (shellAwaitsHuman(shell)) return "pending";
+  // Mark before the send so a second path cannot send the same item; undo if the send fails.
+  if (!claimOnce(storage, SENT_KEYS[entry.kind], entry.id)) return "sent";
+  try {
+    if (await host.sendTurn(threadId, entry.text)) return "sent";
+  } catch {
+    // falls through to pending
+  }
+  releaseOnce(storage, SENT_KEYS[entry.kind], entry.id);
+  return "pending";
+}
+
+async function attemptForward(entry: PendingForward, deps: TurnDeps, report: boolean) {
+  const host = deps.host === undefined ? turnHost : deps.host;
+  const storage = deps.storage === undefined ? defaultStorage() : deps.storage;
+  const target = deps.target === undefined ? defaultTarget() : deps.target;
+  const now = (deps.now ?? Date.now)();
+  const key = `${entry.kind}:${entry.id}`;
+  if (forwardsInFlight.has(key)) return;
+  forwardsInFlight.add(key);
+  try {
+    const sentBefore = readSeen(storage, SENT_KEYS[entry.kind]).includes(entry.id);
+    const result = sentBefore
+      ? "sent"
+      : await deliver(entry, host, deps.lookup ?? readTicketThreadRecord, storage);
+    const others = readPending(storage, now).filter(
+      (item) => !(item.kind === entry.kind && item.id === entry.id),
+    );
+    if (result === "pending") writePending(storage, [...others, entry]);
+    else writePending(storage, others);
+    if (report || result === "sent") postForwarded(target, entry, result);
+  } finally {
+    forwardsInFlight.delete(key);
+  }
+}
+
+/**
+ * Flightplan OP#1840: tries again for every forward that could not be sent at once. Called from the activity beat
+ * (on change and every 30 s) and when the host registers; reports only the ones that went through.
+ */
+export async function retryPendingForwards(deps: TurnDeps = {}): Promise<void> {
+  const storage = deps.storage === undefined ? defaultStorage() : deps.storage;
+  const now = (deps.now ?? Date.now)();
+  const entries = readPending(storage, now);
+  writePending(storage, entries);
+  for (const entry of entries) await attemptForward(entry, deps, false);
+}
+
+async function forwardOnce(
+  kind: ForwardKind,
+  ticket: number,
+  id: number,
+  text: string,
+  deps: TurnDeps,
+): Promise<boolean> {
+  const now = (deps.now ?? Date.now)();
+  await attemptForward({ kind, id, ticket, text, at: now }, deps, true);
+  const storage = deps.storage === undefined ? defaultStorage() : deps.storage;
+  return readSeen(storage, SENT_KEYS[kind]).includes(id);
+}
+
+export interface AnswerContinuation {
+  readonly questionId: number;
+  readonly ticket: number;
+  readonly answer: string;
+}
+
+/** fp:answered with ok:true and valid ticket and answer; anything else stays display only. */
+export function parseAnswerContinuation(data: unknown): AnswerContinuation | null {
+  const message = data as {
+    questionId?: unknown;
+    ok?: unknown;
+    ticket?: unknown;
+    answer?: unknown;
+  } | null;
+  const ticket = positiveTicket(message?.ticket);
+  const questionId = positiveTicket(message?.questionId);
+  if (message?.ok !== true || ticket === null || questionId === null) return null;
+  const answer = sanitizeField(
+    typeof message.answer === "string" ? message.answer : "",
+    TURN_TEXT_MAX_LENGTH,
+    true,
+  );
+  return answer ? { questionId, ticket, answer } : null;
+}
+
+export function answerTurnText(answer: string): string {
+  return `Antwort auf die Rückfrage: ${answer}`;
+}
+
+/** Flightplan OP#1840: continues the ticket's thread with the saved answer, once per question and browser. */
+export async function forwardAnswer(
+  continuation: AnswerContinuation,
+  deps: TurnDeps = {},
+): Promise<boolean> {
+  return forwardOnce(
+    "answer",
+    continuation.ticket,
+    continuation.questionId,
+    answerTurnText(continuation.answer),
+    deps,
+  );
+}
+
+export interface AssumptionDecision {
+  readonly assumptionId: number;
+  readonly ticket: number;
+  readonly decision: "confirmed" | "rejected";
+  readonly text: string;
+  readonly note: string;
+}
+
+export function parseAssumption(data: unknown): AssumptionDecision | null {
+  const message = data as {
+    ticket?: unknown;
+    assumptionId?: unknown;
+    decision?: unknown;
+    text?: unknown;
+    note?: unknown;
+  } | null;
+  const ticket = positiveTicket(message?.ticket);
+  const assumptionId = positiveTicket(message?.assumptionId);
+  if (ticket === null || assumptionId === null) return null;
+  if (message?.decision !== "confirmed" && message?.decision !== "rejected") return null;
+  const text = sanitizeField(
+    typeof message.text === "string" ? message.text : "",
+    TURN_TEXT_MAX_LENGTH,
+    true,
+  );
+  if (!text) return null;
+  const note = sanitizeField(
+    typeof message.note === "string" ? message.note : "",
+    TURN_TEXT_MAX_LENGTH,
+    true,
+  );
+  return { assumptionId, ticket, decision: message.decision, text, note };
+}
+
+export function assumptionTurnText(item: AssumptionDecision): string {
+  if (item.decision === "confirmed") return `Annahme bestätigt: ${item.text}`;
+  const hint = item.note ? ` Hinweis: ${item.note}.` : "";
+  return `Annahme verworfen: ${item.text}.${hint} Baue nicht weiter darauf auf.`;
+}
+
+/** Flightplan OP#1840: tells the ticket's thread what the human decided about an assumption, once per assumption. */
+export async function forwardAssumption(
+  item: AssumptionDecision,
+  deps: TurnDeps = {},
+): Promise<boolean> {
+  return forwardOnce("assumption", item.ticket, item.assumptionId, assumptionTurnText(item), deps);
 }
 
 export function withTicketStartContext(text: string, threadId?: string | null): string {
@@ -603,11 +1118,17 @@ export function subscribeFlightplanChat(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
+/** Flightplan OP#1840: besides the origin, the message must come from the parent window of this frame. */
+export function acceptParentSource(source: unknown, parent: unknown): boolean {
+  return source !== null && source !== undefined && source === parent;
+}
+
 export function installFlightplanChannel(target: Pick<Window, "addEventListener"> = window): void {
   if (flightplanFrameFull() && typeof document !== "undefined") {
     document.documentElement.dataset.fpFrame = "full";
   }
   target.addEventListener("message", (event) => {
+    if (target === window && !acceptParentSource(event.source, window.parent)) return;
     applyParentMessage(event.data, event.origin);
   });
   if (target === window && window.parent !== window) {
