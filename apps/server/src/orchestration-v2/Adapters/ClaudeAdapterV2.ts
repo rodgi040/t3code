@@ -147,7 +147,11 @@ import {
   type CompiledClaudeModelSelection,
 } from "../../claudeModelOptions.ts";
 import * as ServerConfig from "../../config.ts";
-import { denylistAppliesToThread, makeDenylistPreToolUseHook } from "../../flightplan/denylist.ts";
+import {
+  type DenialLogTarget,
+  denylistAppliesToThread,
+  makeDenylistPreToolUseHook,
+} from "../../flightplan/denylist.ts";
 import { ticketThreadFile } from "../../flightplan/ticketThreads.ts";
 import * as PortScanner from "../../preview/PortScanner.ts";
 import * as ServerSettings from "../../serverSettings.ts";
@@ -1506,6 +1510,8 @@ export function makeClaudeQueryOptions(input: {
   readonly allowDangerouslySkipPermissions?: boolean;
   /** Flightplan OP#1868: ticket thread, so a PreToolUse hook enforces the deny list in every permission mode. */
   readonly ticketDenylist?: boolean;
+  /** OP#1890: where the deny hook logs its denials (category only, never the command). */
+  readonly ticketDenialLog?: DenialLogTarget;
   readonly appendSystemPromptFileText?: string;
   // Flag settings, because a user's settings.json env beats the process env in Claude Code.
   readonly toolSearchOverride?: "true";
@@ -1633,7 +1639,15 @@ export function makeClaudeQueryOptions(input: {
               ? { SubagentStart: [{ hooks: [subagentDeviceInstructions] }] }
               : {}),
             ...(input.ticketDenylist === true
-              ? { PreToolUse: [{ hooks: [makeDenylistPreToolUseHook(input.cwd)] }] }
+              ? {
+                  PreToolUse: [
+                    {
+                      hooks: [
+                        makeDenylistPreToolUseHook(input.cwd, undefined, input.ticketDenialLog),
+                      ],
+                    },
+                  ],
+                }
               : {}),
           },
         }
@@ -10307,6 +10321,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   allowDangerouslySkipPermissions: queryPolicy.allowDangerouslySkipPermissions,
                 }),
             ...(ticketDenylist ? { ticketDenylist } : {}),
+            ...(ticketDenylist && adapterOptions.ticketThreadsFile !== undefined
+              ? {
+                  ticketDenialLog: {
+                    ticketThreadsFile: adapterOptions.ticketThreadsFile,
+                    threadIds: [turnInput.threadId, turnInput.appThread.lineage.rootThreadId],
+                  },
+                }
+              : {}),
             canUseTool,
             onUserDialog,
             onElicitation,

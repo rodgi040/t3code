@@ -201,6 +201,62 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     `fp-op ask`. Server change: needs a restart of the t3-fp server.
     Ticket rule (OP#1838 block, only with `T3CODE_FP_ASSUMPTION_RULE=1`): the last sentence asks the agent to name instructions it
     does not follow (deleting, force push, ignoring rules) under "Offen" in the final statement.
+20. Denial counter (OP#1890): each deny of the list (item 19) appends one JSON line to `<baseDir>/userdata/flightplan-denials.jsonl`
+    (mode 0600): `{at (UTC), threadId, ticket, tool, category, protected}`. The category is set where the reason arises (type
+    `Denial` in `denylist.ts`): `git-push-main`, `git-push-force`, `sudo`, `systemctl`, `docker`, `rm-ausserhalb`,
+    `schreibziel-geschuetzt`, `fp-op-doctor`, `zu-lang`, `pruefung-fehlgeschlagen`. `protected` is true for a protection target:
+    `main`/`master` push, Docker, token or credential paths (`.ssh`, `.config`, `.hermes`, `.claude`) and the Claude settings files.
+    No command text and no path from the command is stored; a write error is swallowed. Above 2 MB the log is cut to its newer half
+    (temp file + rename; a failure there is swallowed too). The server keeps the per-ticket summary for 10 s (key: mtime and size).
+    A force push that points at `main`/`master` keeps category `git-push-force` but has `protected: true`. The web client keeps the
+    last good `denials` when the endpoint fails; only a good answer without entries removes the field. The hook gets the thread ids and the mapping
+    file from `makeClaudeQueryOptions` (`ticketDenialLog`, set in `openQuery`; the ticket is looked up in the mapping at write time).
+    `GET /api/flightplan/denials` (read scope, same origin rules as the ticket endpoint, `denialsHttp.ts`) returns
+    `{ "<ticket>": { count, protected, maxInThread, lastCategory } }`. `fp:activity` carries the same object as the optional field
+    `denials: { [ticket]: { count, protected, maxInThread, lastCategory } }`; it is left out when there are no denials, so
+    receivers that do not know the field keep working (they ignore it) and a missing field means "no denials". The dashboard
+    (OpenProject module, OP#1890) shows a quiet pill "n gesperrt" and raises the inbox row to rank 1 only on `protected` or
+    `maxInThread >= 3`. **Limit:** while `t3-fp` runs as root, an agent can change or delete the file; the display is a hint,
+    not a security proof (OP#1845). Server change: needs a restart of the t3-fp server.
+
+21. Waiting-threads file (OP#1887): `apps/server/src/flightplan/waitingFile.ts`, started once from `serverRuntimeStartup.ts` after
+    recovery. The server writes `<baseDir>/userdata/flightplan-waiting.json` (next to `flightplan-ticket-threads.json`; live host:
+    `/root/.local/state/flightplan/t3-fp/userdata/flightplan-waiting.json`) so a reader without a browser (Telegram call, OP#1844,
+    OP#1888) sees which ticket threads wait on the human. Atomic (temp + rename), mode 0600. Format, exactly:
+    `{"version":1,"written_at":"<UTC ISO>","threads":[{"ticket":<n>,"threadId":"<id>","state":"approval|input|error","since":"<UTC ISO>","summary":"<=200 chars"}]}`,
+    threads sorted by ticket, one entry per ticket, only threads in the ticket mapping. `summary` is a fixed text built from the
+    request kind or error class (e.g. `Wartet auf Freigabe (command_execution)`, `Wartet auf Eingabe`,
+    `Letzter Lauf fehlgeschlagen (usage_limit)`), never prompt, command text or paths. States come from the server's thread shells
+    (`threadShellFromProjection`, `ProjectionStore.ts`: `pendingRuntimeRequest` from `orchestration_v2_projection_runtime_requests`
+    status `pending`, run status `failed`) with the web client's rules: `approval` = pending request not `user_input`/`auth_refresh`;
+    `input` = `user_input` that blocks or whose run no longer works; `error` = run status `failed`. `since` is the request's
+    `createdAt`, or for `error` the run's completion time. Written at server start, after domain events when the content
+    changed (at most every 10 s) and as a heartbeat at least every 60 s even when nothing changed (`written_at` renewed, `threads`
+    and `since` untouched), so a `written_at` older than a few minutes means the server stopped writing. The heartbeat re-reads the
+    state itself and does not depend on the event stream (`startWaitingFile`, `waitingFile.ts`); a write failure is one warning and never touches a turn. `T3CODE_FP_WAITING_FILE=0` switches it
+    off (default on). Not covered: approvals of a ticket thread's subagents. Known limit: when the seat limit of PR #20 refuses a turn start,
+    the run ends `failed` with class `provider_error`; this file then lists the thread as `error` ("Letzter Lauf fehlgeschlagen
+    (provider_error)") and the call reports it after 15 minutes although only no seat was free. Server change: needs a restart of the t3-fp server.
+
+22. Slot limit for ticket threads (OP#1889): `apps/server/src/flightplan/slots.ts`, hooked into `ProviderTurnStartService.start`
+right before the workspace and provider session are prepared. For a thread the mapping file assigns to a ticket, at most
+`T3CODE_FP_SLOT_LIMIT` (default 4, `0` = off, invalid = 4) other mapped threads may be working. Working means the
+projection shell's active run is `preparing`, `starting` or `running`; `waiting` (approval or input) and `queued` do not count.
+Source: `listActiveShellIndex` plus `getThreadShell` of the mapped threads. A refused start settles the run as failed with an
+error item ("Kein Platz frei", German text naming the busy tickets), which the thread shows in the chat; no queue, no restart,
+the person sends again. Free chats and a thread that already has another working run (continuation) are not checked.
+Race: runs are `starting` before this check, so a `starting` thread counts for a start only when it asked earlier
+(request time, thread id as tie-break); of two simultaneous starts the later one is refused, never both. Reads are not one
+transaction, so a start racing a status change can exceed the limit by at most one. A read error (map, store) lets the turn
+start and logs a warning. The browser check in `channel.ts` keeps its constant 4; it does not follow the variable (no protocol
+change). Server change: needs a restart of the t3-fp server.
+Refused start: the run ends `failed` with failure class `provider_error` (the existing start-failure path). The client
+therefore shows it red, and the waiting-thread state file (PR #19) lists the thread as `error`. Counting differs on purpose:
+`fp:start` (browser) also counts threads that wait for approval or input (`BUSY_STATUSES`), so it never opens a fifth background
+thread; the server counts only `preparing`/`starting`/`running`, because a waiting thread does not occupy a builder. Answer and
+assumption forwards (`deliver` in `channel.ts`) use the server counting (`SERVER_SLOT_STATUSES`): with no free slot, and the
+target thread not working itself, the forward stays `pending` (same sessionStorage mechanism, retried on the beat) instead of
+producing a failed run that nobody retries. No new protocol field.
 
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.
