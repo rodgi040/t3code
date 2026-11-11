@@ -646,7 +646,11 @@ describe("denylist: denial log", () => {
     JSON.stringify({ "1890": { threadId: uuid, environmentId: "e", projectId: "p" } }),
   );
   const logFile = denialLogFile(mapping);
-  const hookFor = (target?: { ticketThreadsFile: string; threadIds: string[] }) => {
+  const hookFor = (target?: {
+    ticketThreadsFile: string;
+    threadIds: string[];
+    maxBytes?: number;
+  }) => {
     const hook = makeDenylistPreToolUseHook(CWD, undefined, target);
     return (tool_name: string, tool_input: unknown) =>
       hook(
