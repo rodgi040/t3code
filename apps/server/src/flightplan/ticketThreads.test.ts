@@ -8,6 +8,7 @@ import {
   claimTicketThread,
   parseTicketThreadDraft,
   readTicketThreadMap,
+  ticketForThread,
   ticketIdFromPath,
   ticketThreadFile,
   writeTicketThreadMap,
@@ -50,6 +51,17 @@ describe("flightplan ticket threads", () => {
     });
     expect(other.record.threadId).toBe("thread-c");
     expect(other.map["11"]?.threadId).toBe("thread-a");
+  });
+
+  // OP#1853
+  it("finds the ticket of a thread", () => {
+    const map = {
+      "11": { threadId: "thread-a", environmentId: "env", projectId: "project" },
+      "12": { threadId: "thread-b", environmentId: "env", projectId: "project" },
+    };
+    expect(ticketForThread(map, "thread-b")).toBe("12");
+    expect(ticketForThread(map, "thread-x")).toBeUndefined();
+    expect(ticketForThread({}, "thread-a")).toBeUndefined();
   });
 
   it("round-trips the map on disk", () => {
