@@ -158,7 +158,7 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     - `{type:"fp:respond", ticket, threadId, requestId, kind:"question", optionLabel | text}` or
       `{..., kind:"approval", decision:"accept"|"decline", detail}` (`detail` = the command text the dashboard showed; it must equal the
       open request's `detail`, else `gone` and nothing is released); reply `{type:"fp:responded", ticket, requestId, result:"ok"|"gone"|"error"}`.
-      `threadId` must equal the server record of the ticket, the request must be pending in that thread. `optionLabel` must equal
+      `threadId` and `requestId` may be up to 1024 characters (`ID_MAX_LENGTH`; live ids measure 321 and up to 206); `threadId` must equal the server record of the ticket, the request must be pending in that thread. `optionLabel` must equal
       an option label exactly (the provider `value` is sent when the option has one); `text` is cleaned like item 17 and
       cut at 4000 characters, refused when the question disallows custom answers. Approvals use only the decisions
       `accept` and `decline` (single use), never `acceptForSession`, `acceptAlways` or a mode change. Each

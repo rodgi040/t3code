@@ -4,6 +4,7 @@ import { PARENT_ORIGIN, applyParentMessage, acceptParentSource } from "./channel
 import {
   handleRequestsGet,
   handleRespond,
+  ID_MAX_LENGTH,
   isRecommendedLabel,
   parseRespond,
   refreshRequestWatches,
@@ -472,6 +473,56 @@ describe("fp:respond (OP#1842)", () => {
     await handleRespond(q({ requestId: "r1b" }), s);
     expect(sent(s.target).map((m) => m.result)).toEqual(["ok", "error"]);
     expect(s.host.respondUserInput).toHaveBeenCalledTimes(1);
+  });
+
+  it("handles real-length ids from fp:requests to fp:responded and refuses over-long ones", async () => {
+    const qid = "q".repeat(321);
+    const aid = "a".repeat(321);
+    const thread = "t".repeat(206);
+    const s = setup([waiting(thread)], pendingOf([userInput(qid)], [approval(aid)]), {
+      12: thread,
+    });
+    await handleRequestsGet(12, s);
+    const items = sent(s.target)[0].items as Array<{ requestId: string }>;
+    expect(items.map((i) => i.requestId).toSorted()).toEqual([aid, qid]);
+    const base = { ticket: 12, threadId: thread };
+    const question = parseRespond({
+      ...base,
+      requestId: qid,
+      kind: "question",
+      optionLabel: "Nein",
+    });
+    const approve = parseRespond({
+      ...base,
+      requestId: aid,
+      kind: "approval",
+      decision: "accept",
+      detail: "rm -rf build/",
+    });
+    expect(question).not.toBeNull();
+    expect(approve).not.toBeNull();
+    await handleRespond(question!, s);
+    await handleRespond(approve!, s);
+    expect(
+      sent(s.target)
+        .slice(1)
+        .map((m) => m.result),
+    ).toEqual(["ok", "ok"]);
+    const long = "x".repeat(ID_MAX_LENGTH + 1);
+    expect(
+      parseRespond({ ...base, requestId: long, kind: "question", optionLabel: "A" }),
+    ).toBeNull();
+    expect(
+      parseRespond({ ...base, threadId: long, requestId: "r", kind: "question", optionLabel: "A" }),
+    ).toBeNull();
+    expect(
+      parseRespond({
+        ...base,
+        requestId: "x".repeat(ID_MAX_LENGTH),
+        kind: "question",
+        optionLabel: "A",
+      }),
+    ).not.toBeNull();
   });
 
   it("validates the message fields", () => {

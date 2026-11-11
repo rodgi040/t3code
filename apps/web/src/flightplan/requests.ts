@@ -111,7 +111,8 @@ export const REQUESTS_QUERIED_MAX = 50;
 export const REQUESTS_WATCH_MAX = 12;
 const FIRST_DATA_TIMEOUT_MS = 8000;
 const RESPOND_SNAPSHOT_TIMEOUT_MS = 5000;
-const ID_MAX = 200;
+/** Measured on the live store: request ids are 321 characters, thread ids up to 206. */
+export const ID_MAX_LENGTH = 1024;
 const OPTION_LABEL_MAX = 500;
 const ANSWERED_STORE_KEY = "fp:responded";
 const ANSWERED_MAX = 200;
@@ -398,7 +399,9 @@ export type ParsedRespond =
     };
 
 function idField(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 && value.length <= ID_MAX ? value : null;
+  return typeof value === "string" && value.length > 0 && value.length <= ID_MAX_LENGTH
+    ? value
+    : null;
 }
 
 /** Strict validation: unknown kinds, decisions other than accept/decline, both or neither of optionLabel/text -> null. */
