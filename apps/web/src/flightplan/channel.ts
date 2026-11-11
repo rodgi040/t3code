@@ -482,6 +482,19 @@ export function shellIsWorking(shell: Omit<ActivityShell, "id" | "title">): bool
 
 const verifiedThreadTickets = new Map<string, number>();
 
+async function verifiedTicket(
+  chat: FlightplanChatState,
+  shell: ActivityShell,
+  lookup: TicketThreadLookup,
+): Promise<number | null> {
+  const ticketId =
+    verifiedThreadTickets.get(shell.id) ??
+    (await resolveThreadTicket(chat, shell.id, shell.title, lookup));
+  if (!ticketId) return null;
+  verifiedThreadTickets.set(shell.id, ticketId);
+  return ticketId;
+}
+
 /** The tickets whose thread has an agent turn in flight; a title alone never counts (see resolveThreadTicket). */
 export async function workingTickets(
   chat: FlightplanChatState,
@@ -491,20 +504,57 @@ export async function workingTickets(
   const tickets = new Set<number>();
   for (const shell of shells) {
     if (!shellIsWorking(shell)) continue;
-    const ticketId =
-      verifiedThreadTickets.get(shell.id) ??
-      (await resolveThreadTicket(chat, shell.id, shell.title, lookup));
-    if (!ticketId) continue;
-    verifiedThreadTickets.set(shell.id, ticketId);
-    tickets.add(ticketId);
+    const ticketId = await verifiedTicket(chat, shell, lookup);
+    if (ticketId) tickets.add(ticketId);
   }
   return [...tickets].sort((a, b) => a - b);
+}
+
+// Flightplan OP#1834: fp:activity v2 names the state per ticket. Resting threads have none.
+export type ActivityState = "approval" | "input" | "error" | "working";
+const ACTIVITY_RANK: readonly ActivityState[] = ["approval", "input", "error", "working"];
+// The latest run failed or was interrupted (runtime.status, like the sidebar's "failed" dot).
+const ERROR_STATUSES: ReadonlySet<string> = new Set(["failed", "interrupted"]);
+
+export function shellActivityState(
+  shell: Omit<ActivityShell, "id" | "title">,
+): ActivityState | null {
+  if (shell.hasPendingApprovals) return "approval";
+  if (shell.hasPendingUserInput) return "input";
+  const status = shell.runtime?.status ?? "idle";
+  if (ERROR_STATUSES.has(status)) return "error";
+  return WORKING_STATUSES.has(status) ? "working" : null;
+}
+
+export interface TicketActivityState {
+  readonly ticket: number;
+  readonly threadId: string;
+  readonly state: ActivityState;
+}
+
+/** One entry per ticket-thread that is not resting; the ticket's highest-ranked state wins. Same server mapping as workingTickets. */
+export async function ticketActivityStates(
+  chat: FlightplanChatState,
+  shells: ReadonlyArray<ActivityShell>,
+  lookup: TicketThreadLookup = readTicketThreadRecord,
+): Promise<TicketActivityState[]> {
+  const byTicket = new Map<number, TicketActivityState>();
+  for (const shell of shells) {
+    const state = shellActivityState(shell);
+    if (!state) continue;
+    const ticket = await verifiedTicket(chat, shell, lookup);
+    if (!ticket) continue;
+    const known = byTicket.get(ticket);
+    if (known && ACTIVITY_RANK.indexOf(known.state) <= ACTIVITY_RANK.indexOf(state)) continue;
+    byTicket.set(ticket, { ticket, threadId: shell.id, state });
+  }
+  return [...byTicket.values()].sort((a, b) => a.ticket - b.ticket);
 }
 
 let lastActivityReport = "";
 let activityReportSeq = 0;
 
-/** Flightplan OP#1802: tells the dashboard which tickets an agent is working on right now (fp:activity). */
+/** Flightplan OP#1802/OP#1834: tells the dashboard which tickets an agent works on (tickets) and each ticket's state (states, v2). */
 export async function reportActivity(
   shells: ReadonlyArray<ActivityShell>,
   repeat = false,
@@ -517,11 +567,13 @@ export async function reportActivity(
   if (!target || !flightplanFrameFull()) return;
   const seq = ++activityReportSeq;
   const tickets = await workingTickets(state, shells, lookup);
+  const states = await ticketActivityStates(state, shells, lookup);
   if (seq !== activityReportSeq) return;
-  const key = tickets.join(",");
+  const message = { type: "fp:activity", v: 2, tickets, states };
+  const key = JSON.stringify(message);
   if (!repeat && key === lastActivityReport) return;
   lastActivityReport = key;
-  target.postMessage({ type: "fp:activity", tickets }, PARENT_ORIGIN);
+  target.postMessage(message, PARENT_ORIGIN);
 }
 
 export function withTicketStartContext(text: string, threadId?: string | null): string {

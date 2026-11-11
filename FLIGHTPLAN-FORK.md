@@ -74,7 +74,10 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     ticket's `fp-op get` output appended (up to 8 KB) on every turn.
 15. Agent activity per ticket (OP#1802): `FlightplanActivity` (rendered from `AppSidebarLayout`, full layout only) posts
     `{type:"fp:activity"}` with the tickets whose thread has a turn in flight to `http://localhost:8090`, on change and
-    every 30 s. A turn that waits for an approval or an answer does not count. The dashboard shows "Agent arbeitet" in
+    every 30 s. A turn that waits for an approval or an answer does not count in `tickets`. Since OP#1834 the message is
+    `{type:"fp:activity", v:2, tickets:[...], states:[{ticket, threadId, state}]}`: `tickets` keeps its meaning (working
+    only), `states` adds one entry per non-resting ticket thread with `state` `approval`, `input`, `error` (latest run
+    `failed` or `interrupted`) or `working`; with several signals the rank is approval > input > error > working. The dashboard shows "Agent arbeitet" in
     the ticket picker from it; the signal is transient and writes nothing to OpenProject. Concept:
     Factory `Flightplan V1.0/_meta/planning/KONZEPT-OP1802-TICKET-ZUSTAND-20261110.md`.
 16. Start turn on the first open of a ticket (OP#1802): when the dashboard frame creates the thread for a ticket,
