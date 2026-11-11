@@ -310,27 +310,36 @@ describe("denylist: regex cost (A3)", () => {
     return { verdict, ms: now() - start };
   };
 
-  it.each([
-    ["node -e wrapper", `node -e "${"git push origin x ".repeat(3400)}"`],
-    ["plain words", "a ".repeat(25_000)],
-    ["git words", "git ".repeat(12_500)],
-    ["prefix words", "A=b ".repeat(12_500) + "ls"],
-    ["semicolons", "cd a;".repeat(10_000)],
-    ["shell -c", `bash -c '${"x ".repeat(25_000)}'`],
-    ["rm targets", "rm -rf " + "a ".repeat(25_000)],
-    ["find paths", "find " + "a ".repeat(25_000) + "-exec rm {} +"],
-    ["heredoc", `bash <<EOF\n${"git push origin x\n".repeat(3000)}EOF`],
-  ])("returns fast for 50 KB: %s", (_name, command) => {
-    expect(command.length).toBeGreaterThan(24_000);
-    const { ms } = timed(command);
-    expect(ms).toBeLessThan(100);
+  const shapes: ReadonlyArray<readonly [string, (bytes: number) => string]> = [
+    ["node -e wrapper", (n) => `node -e "${"git push origin x ".repeat(n / 16)}"`],
+    ["plain words", (n) => "a ".repeat(n / 2)],
+    ["git words", (n) => "git ".repeat(n / 4)],
+    ["prefix words", (n) => "A=b ".repeat(n / 4) + "ls"],
+    ["semicolons", (n) => "cd a;".repeat(n / 5)],
+    ["shell -c", (n) => `bash -c '${"x ".repeat(n / 2)}'`],
+    ["rm targets", (n) => "rm -rf " + "a ".repeat(n / 2)],
+    ["find paths", (n) => "find " + "a ".repeat(n / 2) + "-exec rm {} +"],
+    ["heredoc", (n) => `bash <<EOF\n${"git push origin x\n".repeat(n / 18)}EOF`],
+  ];
+
+  it.each(shapes)("a 60 KB input is checked fast: %s", (_name, build) => {
+    const command = build(60_000);
+    expect(command.length).toBeGreaterThan(55_000);
+    expect(timed(command).ms).toBeLessThan(200);
+  });
+
+  it.each(shapes)("a 200 KB input returns fast (refused or checked): %s", (_name, build) => {
+    const command = build(200_000);
+    expect(command.length).toBeGreaterThan(190_000);
+    expect(timed(command).ms).toBeLessThan(200);
   });
 
   it("refuses an over-long code text with a plain message", () => {
-    expect(checkBash(`node -e "${"x ".repeat(5000)}"`, ctx)).toBe(
+    expect(checkBash(`node -e "${"x ".repeat(40_000)}"`, ctx)).toBe(
       "Befehlstext zu lang für die Sperrlisten-Prüfung; kürzer fassen",
     );
-    expect(checkBash(`bash -c '${"x ".repeat(5000)}'`, ctx)).toContain("zu lang");
+    expect(checkBash(`bash -c '${"x ".repeat(40_000)}'`, ctx)).toContain("zu lang");
+    expect(checkBash(`python3 - <<EOF\n${"print(1)\n".repeat(1200)}EOF`, ctx)).toBeNull();
   });
 });
 
@@ -505,5 +514,53 @@ describe("denylist: service, fp-op words, mapping file (B3)", () => {
       warn.mockRestore();
       resetDenylistWarnings();
     }
+  });
+});
+
+describe("denylist: limits found in review round 3", () => {
+  it("allows at most 8 push directories per command", async () => {
+    const asked: string[] = [];
+    const lookup = (dir: string) => {
+      asked.push(dir);
+      return Promise.resolve("feature/x");
+    };
+    const many = Array.from({ length: 5000 }, (_, i) => `git -C /tmp/d${i} push`).join("; ");
+    expect(await checkToolCallWithBranches("Bash", { command: many }, ctx, lookup)).toBe(
+      "zu viele git push in einem Befehl für die Sperrlisten-Prüfung; aufteilen",
+    );
+    expect(asked.length).toBeLessThanOrEqual(8);
+    const eight = Array.from({ length: 8 }, (_, i) => `git -C /tmp/d${i} push`).join("; ");
+    expect(await checkToolCallWithBranches("Bash", { command: eight }, ctx, lookup)).toBeNull();
+    expect(asked.length).toBe(8);
+  });
+
+  it.each([
+    "rm -rf /tmp/*",
+    "rm -rf /tmp/op*",
+    "rm -rf /tmp/o?",
+    "rm -rf /tmp/[a-z]*",
+    "rm -rf /var/tmp/*",
+    "rm -rf /root/.local/state/flightplan/worktrees/*",
+    "rm -rf /root/.local/state/flightplan/worktrees/*/node_modules",
+    "rm -rf /work/tree/../*",
+    "rm -rf $TMPDIR/*",
+  ])("blocks a pattern directly under an allowed root: %s", (command) => {
+    expect(blocked(command)).toBe(true);
+  });
+
+  it.each([
+    "rm -rf /tmp/probe/*",
+    "rm -rf /root/.local/state/flightplan/worktrees/op-1-x/dist/*",
+    "rm -rf /root/.local/state/flightplan/worktrees/op-2-y",
+    "rm -rf ./*",
+    "rm -rf dist/*",
+    "rm -rf /work/tree/*",
+  ])("lets %s through", (command) => {
+    expect(blocked(command)).toBe(false);
+  });
+
+  it("keeps cd with a variable and ssh as before", () => {
+    expect(blocked('cd "$DIR" && rm -rf dist')).toBe(true);
+    expect(blocked("ssh host 'sudo ls'")).toBe(true);
   });
 });

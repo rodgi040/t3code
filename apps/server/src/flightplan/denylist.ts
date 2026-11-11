@@ -15,7 +15,7 @@
  *    `find ... -exec CMD`, `xargs CMD`, `ssh host CMD`, `watch CMD` check CMD as a command of its own.
  *    `sh -c`, `bash -c`, `eval` are parsed once more. The code text of `sh|bash -c`, `eval`, `python -c`,
  *    `node|bun -e|-p`, `perl|ruby -e`, `php -r` is also scanned word by word for the core commands
- *    (at most 8 KB; a longer text is refused).
+ *    (at most 64 KB; a longer text is refused).
  *  - Shell writes into protected paths: `>`, `>>`, `&>`, `tee`, `cp`, `mv`, `install`, `ln`, `rsync` (destination),
  *    `sed -i`, `chmod`, `chown`, `touch`, `mkdir`, `truncate`, `dd of=`, `rm`.
  *  - A bare `git push` or `git push origin HEAD` is refused when the hook finds the checked-out branch is main/master.
@@ -26,6 +26,8 @@
  *    base64, a script file (`bash run.sh`, `python x.py`), `git -c alias...`, `gh`/`curl` calls that do the same
  *    remotely, a `cd` inside a subshell that is meant to stay local, symlinks that point into a protected path,
  *    writes by interpreters other than the scanned words (`python -c "open('/etc/x','w')"`).
+ *  - Sibling worktrees by full name (`rm -rf /root/.local/state/flightplan/worktrees/op-2-y`) are allowed on purpose;
+ *    a pattern directly under an allowed root (`/tmp/*`) is refused.
  *  - The branch for a bare `git push` is read with `git symbolic-ref` at hook time; unknown branch means free.
  *  - The list does not replace a sandbox or a host-level control. Against a misled agent only OP#1845 helps.
  */
@@ -265,7 +267,8 @@ const DOCKER_GROUP_DENY: Record<string, ReadonlySet<string>> = {
 };
 
 const MAX_DEPTH = 3;
-const MAX_CODE = 8 * 1024;
+const MAX_CODE = 64 * 1024;
+const MAX_PUSH_DIRS = 8;
 const MAX_FIND_COMBINATIONS = 200;
 const TOO_LONG = "Befehlstext zu lang für die Sperrlisten-Prüfung; kürzer fassen";
 const REDIRECT_WRITE = "\u0000W";
@@ -623,7 +626,6 @@ function checkRm(args: string[], ctx: DenylistContext, home: string): string | n
   if (!recursive) return writeReason(targets, ctx);
   const rootCwd = ctx.rootCwd === undefined ? ctx.cwd : ctx.rootCwd;
   const cwd = rootCwd !== null && rootCwd !== "/" ? NodePath.posix.normalize(rootCwd) : null;
-  const roots = cwd === null ? RM_ROOTS : [cwd, ...RM_ROOTS];
   for (const raw of targets) {
     const path = resolveTarget(raw, ctx, home);
     if (path === null) return `rekursives rm auf einen nicht prüfbaren Pfad (${raw})`;
@@ -633,8 +635,14 @@ function checkRm(args: string[], ctx: DenylistContext, home: string): string | n
     if (path === "/" || path === home || /^\/\*+$/.test(path)) {
       return `rekursives rm auf ${raw} löscht den Host oder das Home-Verzeichnis`;
     }
-    if (!roots.some((root) => path.startsWith(root.endsWith("/") ? root : `${root}/`))) {
+    const below = (root: string) => path.startsWith(root.endsWith("/") ? root : `${root}/`);
+    if (cwd !== null && below(cwd)) continue;
+    const root = RM_ROOTS.find(below);
+    if (root === undefined) {
       return `rekursives rm auf ${raw} außerhalb des Arbeitsordners (erlaubt: darunter, /tmp, /var/tmp, Flightplan-Worktrees)`;
+    }
+    if (/[*?[]/.test(path.slice(root.length + 1).split("/")[0]!)) {
+      return `rekursives rm auf ${raw} mit Muster direkt unter ${root} würde fremde Arbeit löschen`;
     }
   }
   return null;
@@ -1047,6 +1055,9 @@ export async function checkToolCallWithBranches(
   const pushDirs = new Set<string>();
   const first = checkToolCall(toolName, toolInput, { ...ctx, pushDirs });
   if (first !== null || pushDirs.size === 0) return first;
+  if (pushDirs.size > MAX_PUSH_DIRS) {
+    return "zu viele git push in einem Befehl für die Sperrlisten-Prüfung; aufteilen";
+  }
   const branches = new Map<string, string | null>();
   await Promise.all([...pushDirs].map(async (dir) => branches.set(dir, await lookup(dir))));
   return checkToolCall(toolName, toolInput, { ...ctx, branchOf: (dir) => branches.get(dir) });

@@ -179,7 +179,7 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     daemon-reload, edit, kill (and a few like try-restart); `docker`/`docker compose` that change things (run, exec, rm, rmi, stop,
     restart, kill, build, pull, up, down, start, create, push, network/volume/system changes); `fp-op doctor` (only as the first
     word after `fp-op`); recursive `rm` outside the session directory, `/tmp`, `/var/tmp` and `/root/.local/state/flightplan/worktrees/`
-    (strict subpaths only, never the root itself, `$TMPDIR` counts as `/tmp`, other variables are not checkable); a relative
+    (strict subpaths only, never the root itself, a pattern in the first component below `/tmp` etc. such as `/tmp/*` is refused, a sibling worktree by full name is allowed on purpose, `$TMPDIR` counts as `/tmp`, other variables are not checkable); a relative
     target is refused when the effective directory is unknown (`cd -`, `cd` alone, `cd $X`); writes into the protected paths below by
     `>`, `>>`, `&>`, `tee`, `cp`/`mv`/`install`/`ln`/`rsync` (destination, `mv` also the source), `sed -i`, `chmod`, `chown`, `touch`,
     `mkdir`, `truncate`, `dd of=`, `rm`, `find -delete`. Read-only verbs (`status`, `ps`, `logs`, `inspect`, ...) and reads of
@@ -188,9 +188,9 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     `settings.local.json` below a `.claude` folder. Chains (`;`, `&&`, `||`, `|`, newline) are checked part by part, `env`/`nice`/
     `timeout`/`command`/`exec` prefixes are skipped. `find -exec CMD`, `xargs CMD`, `ssh host CMD`, `watch CMD` check CMD as a command
     (`{}` stands for each search path). `sh -c`, `bash -c`, `eval` are parsed once more; the code text of those and of `python -c`,
-    `node|bun -e|-p`, `perl|ruby -e`, `php -r` is scanned word by word for the core commands (at most 8 KB, longer text is refused
+    `node|bun -e|-p`, `perl|ruby -e`, `php -r` is scanned word by word for the core commands (at most 64 KB, longer text is refused
     with "Befehlstext zu lang für die Sperrlisten-Prüfung; kürzer fassen"); other text (`grep "docker run"`, `bun run docker build`)
-    is never searched. Limits: scripts (`bash x.sh`, `python x.py`), variables, aliases, `$(...)` in double quotes outside the
+    is never searched. A command with more than 8 different `git -C` directories is refused. Limits: scripts (`bash x.sh`, `python x.py`), variables, aliases, `$(...)` in double quotes outside the
     wrappers above, base64, a subshell `cd` meant to stay local, symlinks, interpreter file writes and remote tools (`gh`, `curl`)
     are not seen. It stops the straight path, not a deliberate bypass (OP#1845 does that). The message tells the agent to ask with
     `fp-op ask`. Server change: needs a restart of the t3-fp server.
