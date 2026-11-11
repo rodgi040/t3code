@@ -367,6 +367,39 @@ describe("fp:respond (OP#1842)", () => {
     );
   });
 
+  it("keeps deceptive or oversized command text, but not answerable", () => {
+    const texts = [
+      "echo a\u202Eb",
+      "echo a\u2066b",
+      "echo a\u200Bb",
+      "echo a\uFEFFb",
+      "echo a\u2060b",
+      "echo a\rb",
+      "echo a\u0007b",
+      "x".repeat(8001),
+    ];
+    const items = requestItems(
+      pendingOf(
+        [],
+        [
+          ...texts.map((detail, i) => approval(`d${i}`, { detail })),
+          approval("fine", { detail: "a\n\tb" }),
+        ],
+        [...texts, "a\n\tb"],
+      ),
+    );
+    for (const [i, text] of texts.entries()) {
+      const item = items.find((entry) => entry.requestId === `d${i}`);
+      expect(item?.answerable).toBe(false);
+      expect(item?.approval?.detail).toBe(text);
+    }
+    expect(items.find((entry) => entry.requestId === "fine")?.answerable).toBe(true);
+    const edge = "x".repeat(8000);
+    expect(
+      requestItems(pendingOf([], [approval("e", { detail: edge })], [edge]))[0]?.answerable,
+    ).toBe(true);
+  });
+
   it("refuses to approve a request that is not an answerable command", async () => {
     const s = setup(
       [waiting("t1")],

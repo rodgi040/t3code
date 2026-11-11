@@ -137,6 +137,11 @@ export function userInputAnswerable(input: ThreadPendingUserInput): boolean {
   return question.options.length > 0 || question.allowCustomAnswer !== false;
 }
 
+// Bidi controls, zero-width characters and every control character except \n and \t can make a command read differently than it runs.
+const DECEPTIVE_CHARS =
+  /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/;
+export const APPROVAL_DETAIL_MAX = 8000;
+
 export function approvalAnswerable(
   approval: ThreadPendingApproval,
   commands: ReadonlySet<string>,
@@ -145,6 +150,11 @@ export function approvalAnswerable(
   // Only a shell command; every other request (and Codex with a reason, Claude's title or 400-char summary) shows other text.
   if (approval.requestKind !== "command") return false;
   // Never approve what the human could not read in full.
+  if (
+    approval.detail &&
+    (approval.detail.length > APPROVAL_DETAIL_MAX || DECEPTIVE_CHARS.test(approval.detail))
+  )
+    return false;
   if (!approval.detail || !commands.has(approval.detail.trim())) return false;
   if (approval.options === undefined) return true;
   const offered = new Set(approval.options.map((option) => option.decision));

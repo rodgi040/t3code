@@ -148,7 +148,8 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
       `threadId` is null (items empty) when no thread is assigned. `answerable:false`: several questions, multiSelect,
       a question that is not `live`, no custom answer and no options, or an approval that is not a `command`, not `live`,
       whose options lack accept or decline, or whose `detail` does not equal the input of a `command_execution` item of the
-      thread (only then is detail the whole command: Claude shows a title or a 400-character summary for tools other than
+      thread and is at most 8000 characters without bidi controls (U+202A-202E, U+2066-2069), zero-width characters
+      (U+200B-200F, U+2060, U+FEFF) or control characters other than `\n` and `\t` (the text is still reported unchanged); only then is detail the whole command: Claude shows a title or a 400-character summary for tools other than
       Bash, Codex shows `reason` before the command). `recommended`: label ends with "(Recommended)" or "(Empfohlen)".
     - Queried tickets are remembered (at most 50, in memory). On every activity beat (shell change, every 30 s with a
       fresh server lookup) `refreshRequestWatches` starts a subscription for a queried ticket whose thread waits (at most 12),
