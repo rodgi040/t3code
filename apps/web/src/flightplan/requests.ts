@@ -107,8 +107,8 @@ interface RequestDeps {
   readonly storage?: Pick<Storage, "getItem" | "setItem"> | null;
 }
 
-export const REQUESTS_QUERIED_MAX = 50;
-export const REQUESTS_WATCH_MAX = 12;
+const REQUESTS_QUERIED_MAX = 50;
+const REQUESTS_WATCH_MAX = 12;
 const FIRST_DATA_TIMEOUT_MS = 8000;
 const RESPOND_SNAPSHOT_TIMEOUT_MS = 5000;
 /** Measured on the live store: request ids are 321 characters, thread ids up to 206. */
@@ -130,7 +130,7 @@ export function isRecommendedLabel(label: string): boolean {
   return RECOMMENDED_SUFFIX.test(label);
 }
 
-export function userInputAnswerable(input: ThreadPendingUserInput): boolean {
+function userInputAnswerable(input: ThreadPendingUserInput): boolean {
   if (input.responseCapability !== "live") return false;
   if (input.questions.length !== 1) return false;
   const question = input.questions[0];
@@ -141,9 +141,9 @@ export function userInputAnswerable(input: ThreadPendingUserInput): boolean {
 // Bidi controls, zero-width characters and every control character except \n and \t can make a command read differently than it runs.
 const DECEPTIVE_CHARS =
   /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/;
-export const APPROVAL_DETAIL_MAX = 8000;
+const APPROVAL_DETAIL_MAX = 8000;
 
-export function approvalAnswerable(
+function approvalAnswerable(
   approval: ThreadPendingApproval,
   commands: ReadonlySet<string>,
 ): boolean {

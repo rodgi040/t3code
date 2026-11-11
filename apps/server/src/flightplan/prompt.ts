@@ -16,6 +16,12 @@ export function hasTicketContextBlock(text: string): boolean {
   return /^\s*<ticket-context[^>]*>/.test(text);
 }
 
+// Flightplan OP#1853: UUID or 32 hex in, 32 lowercase hex out; anything else (or all zeros) is no trace id.
+export function normalizeTraceId(value: string): string | null {
+  const hex = value.replaceAll("-", "").toLowerCase();
+  return /^[0-9a-f]{32}$/.test(hex) && !/^0+$/.test(hex) ? hex : null;
+}
+
 export function takeTraceMarker(text: string): { text: string; traceId: string | null } {
   const match = [...text.matchAll(TRACE_MARKER)][0];
   return {
@@ -53,12 +59,12 @@ export function startTurnTicket(text: string): string | undefined {
   return (BLOCK_TICKET.exec(text) ?? START_TICKET.exec(text))?.[1];
 }
 
-export function assumptionRuleEnabled(): boolean {
+function assumptionRuleEnabled(): boolean {
   return process.env.T3CODE_FP_ASSUMPTION_RULE === "1";
 }
 
 // Flightplan OP#1838: decide inside the approved plan, record the assumption on the ticket, ask about reserved topics.
-export function assumptionRule(ticket: string): string {
+function assumptionRule(ticket: string): string {
   return [
     "Regeln für Entscheidungen in diesem Ticket:",
     "- Entscheidungen innerhalb des freigegebenen Plans und Scopes des Tickets triffst du selbst. Frag dafür nicht nach.",
@@ -99,7 +105,81 @@ function runFpOp(id: string): Promise<{ id: string; ok: boolean; body: string }>
   });
 }
 
-async function openClaudeTrace(traceId: string, threadId?: string): Promise<string | null> {
+const SPAN_NAME = "t3-fp-claude";
+const SERVICE = "t3-fp";
+
+type OtlpValue =
+  | { stringValue: string }
+  | { arrayValue: { values: Array<{ stringValue: string }> } };
+
+function otlpAttrs(
+  entries: Record<string, string | string[]>,
+): Array<{ key: string; value: OtlpValue }> {
+  return Object.entries(entries).map(([key, value]) => ({
+    key,
+    value: Array.isArray(value)
+      ? { arrayValue: { values: value.map((stringValue) => ({ stringValue })) } }
+      : { stringValue: value },
+  }));
+}
+
+/**
+ * Flightplan OP#1853: OTLP/JSON body of one turn span (shape of claude_code_sender.py). Identifiers only, no prompt or
+ * answer text: the input has no free text or metadata field.
+ */
+export function buildTurnSpanBody(input: {
+  traceId: string;
+  spanId: string;
+  nowMs: number;
+  threadId?: string;
+  ticket?: string;
+}) {
+  const ticket = input.ticket && /^\d+$/.test(input.ticket) ? input.ticket : undefined;
+  const nanos = (BigInt(input.nowMs) * 1_000_000n).toString();
+  const attributes = otlpAttrs({
+    ...(input.threadId ? { "langfuse.session.id": input.threadId } : {}),
+    "langfuse.trace.name": SPAN_NAME,
+    "langfuse.observation.type": "span",
+    "langfuse.trace.tags": ["harness:t3-fp", ...(ticket ? [`ticket:${ticket}`] : [])],
+    "langfuse.trace.metadata.source": SERVICE,
+    ...(input.threadId ? { "langfuse.trace.metadata.thread_id": input.threadId } : {}),
+    ...(ticket ? { "langfuse.trace.metadata.fp_issue": ticket } : {}),
+  });
+  return {
+    resourceSpans: [
+      {
+        resource: {
+          attributes: otlpAttrs({ "service.name": SERVICE, "langfuse.environment": SERVICE }),
+        },
+        scopeSpans: [
+          {
+            scope: { name: SERVICE },
+            spans: [
+              {
+                traceId: input.traceId,
+                spanId: input.spanId,
+                name: SPAN_NAME,
+                kind: 1,
+                startTimeUnixNano: nanos,
+                endTimeUnixNano: nanos,
+                attributes,
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/** Flightplan OP#1853: one OTLP span per Claude turn to Langfuse; fail-open, returns the trace id only on 2xx. */
+export async function sendTurnSpan(
+  traceId: string,
+  threadId?: string,
+  ticket?: string,
+): Promise<string | null> {
+  const id = normalizeTraceId(traceId);
+  if (!id) return null;
   const path = process.env.FP_LANGFUSE_ENV || "/root/.config/fp-langfuse-sender/env";
   if (!NodeFS.existsSync(path)) return null;
   let publicKey = "";
@@ -119,30 +199,25 @@ async function openClaudeTrace(traceId: string, threadId?: string): Promise<stri
     return null;
   }
   if (!publicKey || !secretKey) return null;
-  const id = traceId || NodeCrypto.randomUUID();
-  const body = {
-    batch: [
-      {
-        id,
-        type: "trace-create",
-        timestamp: new Date().toISOString(),
-        body: {
-          id,
-          name: "t3-fp-claude",
-          ...(threadId ? { sessionId: threadId } : {}),
-          metadata: { source: "t3-fp", ...(threadId ? { threadId } : {}) },
-        },
-      },
-    ],
-  };
+  const body = buildTurnSpanBody({
+    traceId: id,
+    spanId: NodeCrypto.randomBytes(8).toString("hex"),
+    // Plain promise code outside the Effect runtime, so no Clock service here.
+    // @effect-diagnostics-next-line globalDate:off
+    nowMs: Date.now(),
+    ...(threadId ? { threadId } : {}),
+    ...(ticket ? { ticket } : {}),
+  });
   try {
-    const response = await fetch(`${host.replace(/\/$/, "")}/api/public/ingestion`, {
+    const response = await fetch(`${host.replace(/\/$/, "")}/api/public/otel/v1/traces`, {
       method: "POST",
       headers: {
         authorization: `Basic ${Buffer.from(`${publicKey}:${secretKey}`).toString("base64")}`,
         "content-type": "application/json",
+        "x-langfuse-ingestion-version": "4",
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(5_000),
     });
     return response.ok ? id : null;
   } catch {
@@ -160,8 +235,10 @@ export async function enrichFlightplanPrompt(input: {
   driver: string;
   firstTurn: boolean;
   threadId?: string;
+  /** Flightplan OP#1853: ticket of the thread from the mapping file, read by the caller. */
+  ticket?: string;
   run?: (id: string) => Promise<{ id: string; ok: boolean; body: string }>;
-  trace?: (id: string, threadId?: string) => Promise<string | null>;
+  trace?: (id: string, threadId?: string, ticket?: string) => Promise<string | null>;
 }): Promise<string> {
   const marked = takeTraceMarker(input.text);
   if (isSlashCommand(marked.text)) return marked.text;
@@ -171,13 +248,20 @@ export async function enrichFlightplanPrompt(input: {
   for (const id of ids) blocks.push(await run(id));
   const text = withTicketContext(marked.text, blocks);
   if (input.driver !== "claudeAgent") return text;
-  const traceId = marked.traceId ?? NodeCrypto.randomUUID();
-  const opened = await (input.trace ?? openClaudeTrace)(traceId, input.threadId);
+  const traceId =
+    (marked.traceId ? normalizeTraceId(marked.traceId) : null) ??
+    NodeCrypto.randomUUID().replaceAll("-", "");
+  const startTicket = startTurnTicket(marked.text);
+  const opened = await (input.trace ?? sendTurnSpan)(
+    traceId,
+    input.threadId,
+    input.ticket ?? startTicket,
+  );
   if (!input.firstTurn) return text;
   const hinted = withClaudeHint(
     text,
     input.driver,
-    assumptionRuleEnabled() ? startTurnTicket(marked.text) : undefined,
+    assumptionRuleEnabled() ? startTicket : undefined,
   );
   return opened ? `${hinted}\n\nTrace: ${opened}` : hinted;
 }

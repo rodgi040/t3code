@@ -26,6 +26,11 @@ import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
 import { enrichFlightplanPrompt } from "../flightplan/prompt.ts";
+import {
+  readTicketThreadMap,
+  ticketForThread,
+  ticketThreadFile,
+} from "../flightplan/ticketThreads.ts";
 import * as ServerConfig from "../config.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
@@ -153,6 +158,7 @@ export const layer: Layer.Layer<
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    const serverConfig = yield* ServerConfig.ServerConfig;
     const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
     const projects = yield* ProjectService.ProjectService;
     const providerAuth = yield* ProviderAuthService.ProviderAuthService;
@@ -836,12 +842,21 @@ export const layer: Layer.Layer<
           candidate.userMessageId === message.id ||
           (candidate.userMessageId !== null && earlierCommandIds.has(candidate.userMessageId)),
       );
+      // Flightplan OP#1853: the span carries the thread's ticket from the mapping file; only Claude turns send one.
+      const threadTicket =
+        session.driver === "claudeAgent"
+          ? ticketForThread(
+              readTicketThreadMap(ticketThreadFile(serverConfig.baseDir)),
+              input.threadId,
+            )
+          : undefined;
       const userText = yield* Effect.promise(() =>
         enrichFlightplanPrompt({
           text: draftedUserText,
           driver: session.driver,
           firstTurn,
           threadId: input.threadId,
+          ...(threadTicket ? { ticket: threadTicket } : {}),
         }).catch(() => draftedUserText),
       );
       // Codex and Claude parse /goal from the prompt, so it goes verbatim and history waits a turn.

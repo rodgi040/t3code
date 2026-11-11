@@ -32,6 +32,11 @@ export function claimTicketThread(
   };
 }
 
+// Flightplan OP#1853: reverse lookup, the ticket whose entry carries this thread.
+export function ticketForThread(map: TicketThreadMap, threadId: string): string | undefined {
+  return Object.entries(map).find(([, record]) => record.threadId === threadId)?.[0];
+}
+
 export function readTicketThreadMap(file: string): TicketThreadMap {
   try {
     const parsed = JSON.parse(NodeFS.readFileSync(file, "utf8")) as unknown;
