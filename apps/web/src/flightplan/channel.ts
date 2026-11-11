@@ -176,8 +176,25 @@ export function applyParentMessage(data: unknown, origin: string): boolean {
     items?: unknown;
     threadId?: unknown;
   };
-  if (message.type === "fp:answered")
-    return applyAnswered(data as Partial<FlightplanAnsweredMessage>);
+  if (message.type === "fp:answered") {
+    const shown = applyAnswered(data as Partial<FlightplanAnsweredMessage>);
+    // Flightplan OP#1840: new fields ticket/answer continue the ticket's thread; without them it stays display only.
+    const continuation = parseAnswerContinuation(data);
+    if (continuation) void forwardAnswer(continuation);
+    return shown;
+  }
+  if (message.type === "fp:start") {
+    const ticket = positiveTicket((data as { ticket?: unknown }).ticket);
+    if (ticket === null) return false;
+    void handleStart(ticket);
+    return true;
+  }
+  if (message.type === "fp:assumption") {
+    const assumption = parseAssumption(data);
+    if (!assumption) return false;
+    void forwardAssumption(assumption);
+    return true;
+  }
   if (message.type === "fp:events")
     return applyEvents(data as { wpId?: unknown; events?: unknown });
   if (message.type === "fp:commented")
@@ -574,6 +591,346 @@ export async function reportActivity(
   if (!repeat && key === lastActivityReport) return;
   lastActivityReport = key;
   target.postMessage(message, PARENT_ORIGIN);
+}
+
+// Flightplan OP#1840: background start and continuation of ticket threads (fp:start, fp:answered, fp:assumption).
+
+/** Contract Phase 2a: at most this many ticket threads work at the same time; fp:start refuses a fifth. */
+export const TICKET_SLOT_LIMIT = 4;
+/** Longest text from a parent message that goes into a turn (answer, assumption text, note). */
+export const TURN_TEXT_MAX_LENGTH = 4000;
+// A thread just started may not show as working yet; it keeps its slot for this long.
+const RECENT_START_MS = 15_000;
+const FORWARDED_MAX = 200;
+const ANSWER_STORE_KEY = "fp:answered-forwarded";
+const ASSUMPTION_STORE_KEY = "fp:assumption-forwarded";
+const BUSY_STATUSES: ReadonlySet<string> = new Set([...WORKING_STATUSES, "waiting"]);
+
+export type StartReason = "slots" | "running" | "error";
+
+export interface FlightplanStartedMessage {
+  readonly type: "fp:started";
+  readonly ticket: number;
+  readonly threadId: string | null;
+  readonly result: "accepted" | "rejected";
+  readonly reason: StartReason | null;
+}
+
+/**
+ * What the chat frame offers the channel for turns. The route layer (FlightplanActivity) registers it; the channel
+ * itself stays free of React and orchestration imports.
+ */
+export interface TicketTurnHost {
+  /** The current thread shells (all threads, not only the open one). */
+  readonly shells: () => ReadonlyArray<ActivityShell>;
+  /** Creates a thread for the ticket, secures the server record and sends the start turn. Does not navigate. */
+  readonly startNew: (ticket: number) => Promise<string>;
+  /** Sends the start turn into an existing, resting thread of the ticket. */
+  readonly startExisting: (threadId: string, ticket: number) => Promise<boolean>;
+  /** Sends a user turn into a thread with the model and mode the thread last ran with. */
+  readonly sendTurn: (threadId: string, text: string) => Promise<boolean>;
+}
+
+interface TurnDeps {
+  readonly host?: TicketTurnHost | null;
+  readonly target?: Pick<Window, "postMessage"> | null;
+  readonly lookup?: TicketThreadLookup;
+  readonly storage?: Pick<Storage, "getItem" | "setItem"> | null;
+  readonly now?: () => number;
+}
+
+let turnHost: TicketTurnHost | null = null;
+const startsInFlight = new Map<number, number>();
+
+export function setTicketTurnHost(host: TicketTurnHost | null): void {
+  turnHost = host;
+}
+
+/** For tests: forgets in-flight starts. */
+export function resetTicketStarts(): void {
+  startsInFlight.clear();
+}
+
+function positiveTicket(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function defaultTarget(): Pick<Window, "postMessage"> | null {
+  return typeof window !== "undefined" && window.parent !== window ? window.parent : null;
+}
+
+function defaultStorage(): Pick<Storage, "getItem" | "setItem"> | null {
+  try {
+    return typeof sessionStorage !== "undefined" ? sessionStorage : null;
+  } catch {
+    return null;
+  }
+}
+
+function readSeen(storage: Pick<Storage, "getItem"> | null, key: string): number[] {
+  try {
+    const parsed: unknown = JSON.parse(storage?.getItem(key) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((id): id is number => typeof id === "number") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSeen(storage: Pick<Storage, "setItem"> | null, key: string, ids: number[]): void {
+  try {
+    storage?.setItem(key, JSON.stringify(ids.slice(-FORWARDED_MAX)));
+  } catch {
+    // A full or blocked sessionStorage only weakens the duplicate guard.
+  }
+}
+
+/** True when the id is new and now remembered; false for a repeat. The mark is set before any await. */
+function claimOnce(storage: Pick<Storage, "getItem" | "setItem"> | null, key: string, id: number) {
+  const seen = readSeen(storage, key);
+  if (seen.includes(id)) return false;
+  writeSeen(storage, key, [...seen, id]);
+  return true;
+}
+
+function releaseOnce(
+  storage: Pick<Storage, "getItem" | "setItem"> | null,
+  key: string,
+  id: number,
+) {
+  writeSeen(
+    storage,
+    key,
+    readSeen(storage, key).filter((entry) => entry !== id),
+  );
+}
+
+function shellBusy(shell: ActivityShell): boolean {
+  return (
+    BUSY_STATUSES.has(shell.runtime?.status ?? "idle") ||
+    Boolean(shell.hasPendingApprovals) ||
+    Boolean(shell.hasPendingUserInput)
+  );
+}
+
+function shellAwaitsHuman(shell: ActivityShell): boolean {
+  return Boolean(shell.hasPendingApprovals) || Boolean(shell.hasPendingUserInput);
+}
+
+/** The thread the server assigns to the ticket (never the title), or null. */
+async function assignedThreadId(
+  ticket: number,
+  lookup: TicketThreadLookup,
+): Promise<string | null> {
+  const record = await lookup(ticket).catch(() => null);
+  return typeof record?.threadId === "string" && record.threadId ? record.threadId : null;
+}
+
+function replyStarted(
+  target: Pick<Window, "postMessage"> | null,
+  ticket: number,
+  result: "accepted" | "rejected",
+  threadId: string | null,
+  reason: StartReason | null,
+): void {
+  const message: FlightplanStartedMessage = {
+    type: "fp:started",
+    ticket,
+    threadId,
+    result,
+    reason,
+  };
+  target?.postMessage(message, PARENT_ORIGIN);
+}
+
+function activeStartTickets(now: number): Set<number> {
+  for (const [ticket, at] of startsInFlight) {
+    if (now - at > RECENT_START_MS) startsInFlight.delete(ticket);
+  }
+  return new Set(startsInFlight.keys());
+}
+
+/**
+ * Flightplan OP#1840: fp:start. Creates (or reuses the resting) thread of the ticket and sends the start turn without
+ * changing the visible view. Answers with fp:started.
+ */
+export async function handleStart(ticket: number, deps: TurnDeps = {}): Promise<void> {
+  const host = deps.host === undefined ? turnHost : deps.host;
+  const target = deps.target === undefined ? defaultTarget() : deps.target;
+  const lookup = deps.lookup ?? readTicketThreadRecord;
+  const now = (deps.now ?? Date.now)();
+  const reply = (
+    result: "accepted" | "rejected",
+    threadId: string | null,
+    reason: StartReason | null,
+  ) => replyStarted(target, ticket, result, threadId, reason);
+  if (!host) return reply("rejected", null, "error");
+  if (activeStartTickets(now).has(ticket)) return reply("rejected", null, "running");
+  startsInFlight.set(ticket, now);
+  let accepted = false;
+  try {
+    const shells = host.shells();
+    const assigned = await assignedThreadId(ticket, lookup);
+    const shell = assigned ? shells.find((item) => item.id === assigned) : undefined;
+    if (assigned && !shell) return reply("rejected", null, "error");
+    if (shell && shellBusy(shell)) return reply("rejected", assigned, "running");
+    const working = new Set(
+      (await ticketActivityStates(state, shells, lookup))
+        .filter((entry) => entry.state === "working")
+        .map((entry) => entry.ticket),
+    );
+    for (const other of activeStartTickets(now)) if (other !== ticket) working.add(other);
+    if (working.size >= TICKET_SLOT_LIMIT) return reply("rejected", null, "slots");
+    if (shell) {
+      if (!(await host.startExisting(shell.id, ticket)))
+        return reply("rejected", shell.id, "error");
+      accepted = true;
+      return reply("accepted", shell.id, null);
+    }
+    const threadId = await host.startNew(ticket);
+    accepted = true;
+    return reply("accepted", threadId, null);
+  } catch {
+    return reply("rejected", null, "error");
+  } finally {
+    if (!accepted) startsInFlight.delete(ticket);
+  }
+}
+
+/** Sends a turn into the ticket's own thread. "blocked" means the thread waits for approval or input. */
+async function sendIntoTicketThread(
+  ticket: number,
+  text: string,
+  host: TicketTurnHost,
+  lookup: TicketThreadLookup,
+): Promise<"sent" | "no-thread" | "blocked" | "error"> {
+  const threadId = await assignedThreadId(ticket, lookup);
+  const shell = threadId ? host.shells().find((item) => item.id === threadId) : undefined;
+  if (!threadId || !shell) return "no-thread";
+  if (shellAwaitsHuman(shell)) return "blocked";
+  try {
+    return (await host.sendTurn(threadId, text)) ? "sent" : "error";
+  } catch {
+    return "error";
+  }
+}
+
+async function forwardOnce(
+  ticket: number,
+  id: number,
+  storeKey: string,
+  text: string,
+  deps: TurnDeps,
+): Promise<boolean> {
+  const host = deps.host === undefined ? turnHost : deps.host;
+  if (!host) return false;
+  const storage = deps.storage === undefined ? defaultStorage() : deps.storage;
+  if (!claimOnce(storage, storeKey, id)) return false;
+  const outcome = await sendIntoTicketThread(
+    ticket,
+    text,
+    host,
+    deps.lookup ?? readTicketThreadRecord,
+  );
+  if (outcome === "sent") return true;
+  releaseOnce(storage, storeKey, id);
+  return false;
+}
+
+export interface AnswerContinuation {
+  readonly questionId: number;
+  readonly ticket: number;
+  readonly answer: string;
+}
+
+/** fp:answered with ok:true and valid ticket and answer; anything else stays display only. */
+export function parseAnswerContinuation(data: unknown): AnswerContinuation | null {
+  const message = data as {
+    questionId?: unknown;
+    ok?: unknown;
+    ticket?: unknown;
+    answer?: unknown;
+  } | null;
+  const ticket = positiveTicket(message?.ticket);
+  const questionId = positiveTicket(message?.questionId);
+  if (message?.ok !== true || ticket === null || questionId === null) return null;
+  const answer = sanitizeField(
+    typeof message.answer === "string" ? message.answer : "",
+    TURN_TEXT_MAX_LENGTH,
+    true,
+  );
+  return answer ? { questionId, ticket, answer } : null;
+}
+
+export function answerTurnText(answer: string): string {
+  return `Antwort auf die Rückfrage: ${answer}`;
+}
+
+/** Flightplan OP#1840: continues the ticket's thread with the saved answer, once per question and browser. */
+export async function forwardAnswer(
+  continuation: AnswerContinuation,
+  deps: TurnDeps = {},
+): Promise<boolean> {
+  return forwardOnce(
+    continuation.ticket,
+    continuation.questionId,
+    ANSWER_STORE_KEY,
+    answerTurnText(continuation.answer),
+    deps,
+  );
+}
+
+export interface AssumptionDecision {
+  readonly assumptionId: number;
+  readonly ticket: number;
+  readonly decision: "confirmed" | "rejected";
+  readonly text: string;
+  readonly note: string;
+}
+
+export function parseAssumption(data: unknown): AssumptionDecision | null {
+  const message = data as {
+    ticket?: unknown;
+    assumptionId?: unknown;
+    decision?: unknown;
+    text?: unknown;
+    note?: unknown;
+  } | null;
+  const ticket = positiveTicket(message?.ticket);
+  const assumptionId = positiveTicket(message?.assumptionId);
+  if (ticket === null || assumptionId === null) return null;
+  if (message?.decision !== "confirmed" && message?.decision !== "rejected") return null;
+  const text = sanitizeField(
+    typeof message.text === "string" ? message.text : "",
+    TURN_TEXT_MAX_LENGTH,
+    true,
+  );
+  if (!text) return null;
+  const note = sanitizeField(
+    typeof message.note === "string" ? message.note : "",
+    TURN_TEXT_MAX_LENGTH,
+    true,
+  );
+  return { assumptionId, ticket, decision: message.decision, text, note };
+}
+
+export function assumptionTurnText(item: AssumptionDecision): string {
+  if (item.decision === "confirmed") return `Annahme bestätigt: ${item.text}`;
+  const hint = item.note ? ` Hinweis: ${item.note}.` : "";
+  return `Annahme verworfen: ${item.text}.${hint} Baue nicht weiter darauf auf.`;
+}
+
+/** Flightplan OP#1840: tells the ticket's thread what the human decided about an assumption, once per assumption. */
+export async function forwardAssumption(
+  item: AssumptionDecision,
+  deps: TurnDeps = {},
+): Promise<boolean> {
+  return forwardOnce(
+    item.ticket,
+    item.assumptionId,
+    ASSUMPTION_STORE_KEY,
+    assumptionTurnText(item),
+    deps,
+  );
 }
 
 export function withTicketStartContext(text: string, threadId?: string | null): string {

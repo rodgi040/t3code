@@ -85,5 +85,25 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     Reopening the ticket, the compact workplace embed and a lost claim race send nothing. The ticket block goes out
     while the thread has no user message yet (`useComposerSend.ts`).
 
+17. Background start and continuation (OP#1840, contract Phase 2a section 4). All messages come from
+    `http://localhost:8090` only and are handled by `FlightplanActivity` (full layout), which registers the turn host of
+    `channel.ts`. Text from a message is only the text of a turn, never HTML; `answer`/`text`/`note` are cut at 4000
+    characters; `ticket` must be a positive integer. A turn goes only into the thread the server record
+    (`/api/flightplan/tickets/<n>`) assigns to the ticket, never by title, with the model and mode the thread has.
+    A thread that waits for an approval or an input gets no turn.
+    - `{type:"fp:start", ticket}` (OP to T3): creates the ticket's thread if none is assigned (`createTicketThread` in
+      `ticketThread.ts`, also used by the embed route) and sends the start turn, without navigating. A resting thread
+      is reused. Reply `{type:"fp:started", ticket, threadId|null, result:"accepted"|"rejected", reason:null|"slots"|"running"|"error"}`:
+      `running` when the ticket's thread has a turn or waits for the human (or a start for it is under 15 s old),
+      `slots` when `TICKET_SLOT_LIMIT` (4) other tickets are `working` (state logic of fp:activity v2), `error` on a
+      failure, a missing host or a deleted thread. The first-click start of item 16 is unchanged.
+    - `{type:"fp:answered", questionId, ok:true, ticket, answer}`: besides the display, sends the turn
+      `Antwort auf die Rückfrage: <answer>` into the ticket's thread, also when it is not the open one. Once per
+      `questionId` and browser (`sessionStorage` key `fp:answered-forwarded`). Without `ticket`/`answer` or with
+      `ok:false` it stays display only.
+    - `{type:"fp:assumption", ticket, assumptionId, decision:"confirmed"|"rejected", text, note|null}`: sends
+      `Annahme bestätigt: <text>` or `Annahme verworfen: <text>. Hinweis: <note>. Baue nicht weiter darauf auf.`
+      Once per `assumptionId` (`fp:assumption-forwarded`).
+
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.
