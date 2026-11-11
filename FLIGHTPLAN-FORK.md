@@ -190,7 +190,7 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     (`{}` stands for each search path). `sh -c`, `bash -c`, `eval` are parsed once more; the code text of those and of `python -c`,
     `node|bun -e|-p`, `perl|ruby -e`, `php -r` is scanned word by word for the core commands (at most 64 KB, longer text is refused
     with "Befehlstext zu lang für die Sperrlisten-Prüfung; kürzer fassen"); other text (`grep "docker run"`, `bun run docker build`)
-    is never searched. A command with more than 8 different `git -C` directories is refused. Limits: scripts (`bash x.sh`, `python x.py`), variables, aliases, `$(...)` in double quotes outside the
+    is never searched. Simple assignments in the same command are followed like `cd` (`VAR=/path`, `VAR=$(mktemp -d ...)`, `VAR=$(pwd)`, also behind `export`/`local`, replaced in `rm`, redirects, `cp`/`mv` and `cd` before the path check; unknown names stay unchecked and are refused; a subshell assignment counts as global). A command with more than 8 different `git -C` directories is refused. Limits: scripts (`bash x.sh`, `python x.py`), variables, aliases, `$(...)` in double quotes outside the
     wrappers above, base64, a subshell `cd` meant to stay local, symlinks, interpreter file writes and remote tools (`gh`, `curl`)
     are not seen. It stops the straight path, not a deliberate bypass (OP#1845 does that). The message tells the agent to ask with
     `fp-op ask`. Server change: needs a restart of the t3-fp server.

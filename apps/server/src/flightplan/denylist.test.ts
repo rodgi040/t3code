@@ -564,3 +564,73 @@ describe("denylist: limits found in review round 3", () => {
     expect(blocked("ssh host 'sudo ls'")).toBe(true);
   });
 });
+
+describe("denylist: simple variables in one command", () => {
+  it.each([
+    'HELP=$(mktemp -d /tmp/op-1857-hilf.XXXX) && echo hi > "$HELP/a.txt" && rm -rf "$HELP"',
+    'D=$(mktemp -d); rm -rf "$D"',
+    'D=$(mktemp -d -t x.XXXX); rm -rf "$D"',
+    'D=$(mktemp -d -p /tmp); rm -rf "$D"',
+    'D=$(mktemp -d --tmpdir=/var/tmp); rm -rf "$D"',
+    'D=$(mktemp -d --tmpdir x.XXXX); rm -rf "${D}"',
+    'D=`mktemp -d`; rm -rf "$D/sub"',
+    'D="$(mktemp -d)"; rm -rf $D',
+    "export D=$(mktemp -d); rm -rf $D",
+    'local D=$(mktemp -d /tmp/x.XXXX); rm -rf "$D"',
+    "F=$(mktemp); echo x > $F; rm -rf $F",
+    "T=/tmp/probe; rm -rf $T",
+    'T="/tmp/probe"; rm -rf "$T/sub"',
+    "T='/tmp/probe'; rm -rf ${T}/sub",
+    "A=/tmp; B=$A/x; rm -rf $B",
+    "P=$(pwd); rm -rf $P/dist",
+    "rm -rf $PWD/dist",
+    "H=~; rm -rf $H/../../tmp/x",
+    'D=$(mktemp -d); cd "$D" && rm -rf x',
+    'X=/etc; X=/tmp/y; rm -rf "$X"',
+    "rm -rf $TMPDIR/probe",
+  ])("lets %s through", (command) => {
+    expect(blocked(command)).toBe(false);
+  });
+
+  it.each([
+    'X=/etc; rm -rf "$X/foo"',
+    'X=/; rm -rf "$X"',
+    'D=$(mktemp -d); rm -rf "$D/../.."',
+    'D=$(mktemp -d); rm -rf "$D/.."',
+    'T=/tmp; rm -rf "$T"/*',
+    'F=/opt/x; echo a > "$F"',
+    'F=/opt/x; tee "$F"',
+    'F=/opt/x; cp a "$F"',
+    'X=/tmp/y; X=/etc; rm -rf "$X/foo"',
+    "X=$(git rev-parse --show-toplevel); rm -rf $X",
+    'DIR=$(git rev-parse --show-toplevel); cd "$DIR" && rm -rf dist',
+    "rm -rf $NEVER_SET",
+    "rm -rf $X; X=/tmp/y",
+    "X=/tmp/y; unset X; rm -rf $X",
+    "A=$A/x; rm -rf $A",
+    'D=$(mktemp -d --suffix=x ../../etc/y.XXXX); rm -rf "$D"',
+    "S=sudo; $S ls",
+    "X=$(sudo id)",
+    'X=$(mktemp -d -p "$OTHER"); rm -rf $X',
+    "(X=/etc; true); rm -rf $X/y",
+  ])("blocks %s", (command) => {
+    expect(blocked(command)).toBe(true);
+  });
+
+  it("stays linear with many assignments", () => {
+    // oxlint-disable-next-line t3code/no-wall-clock-in-tests -- guard against quadratic cost; the margin is large
+    const start = Date.now();
+    const shapes = [
+      "A=$(mktemp -d);".repeat(3500),
+      "A=$A$A;".repeat(8000),
+      "A=$(".repeat(12_000),
+      "export A=/tmp/x;".repeat(3000) + "rm -rf $A",
+    ];
+    for (const command of shapes) {
+      expect(command.length).toBeGreaterThan(24_000);
+      checkBash(command, ctx);
+    }
+    // oxlint-disable-next-line t3code/no-wall-clock-in-tests -- see above
+    expect(Date.now() - start).toBeLessThan(800);
+  });
+});

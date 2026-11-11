@@ -12,6 +12,9 @@
  *  - Bash: every part of a simple chain (`;`, `&&`, `||`, `|`, `&`, newlines, `( )`, backticks) on its own.
  *    Leading `VAR=x`, `env`, `nice`, `ionice`, `timeout N`, `command`, `exec`, `time`, `nohup`, `setsid`,
  *    `stdbuf` are skipped. A literal `cd <dir>` in the chain changes the directory for the parts after it.
+ *    Simple assignments in the same command are followed too: `VAR=/path`, `VAR=$(mktemp -d ...)`, `VAR=$(pwd)`,
+ *    also behind `export`/`local`/`readonly`; `$VAR`, `${VAR}` are replaced before the path checks. Anything else
+ *    (`$(git rev-parse ...)`, unset names) stays unknown and is refused where a path is needed.
  *    `find ... -exec CMD`, `xargs CMD`, `ssh host CMD`, `watch CMD` check CMD as a command of its own.
  *    `sh -c`, `bash -c`, `eval` are parsed once more. The code text of `sh|bash -c`, `eval`, `python -c`,
  *    `node|bun -e|-p`, `perl|ruby -e`, `php -r` is also scanned word by word for the core commands
@@ -281,8 +284,30 @@ interface Segment {
 }
 
 /** Splits a command line into simple commands made of words. Quotes are removed, operators split. */
-function tokenize(line: string): Segment[] {
+function matchParen(line: string, from: number): number {
+  let depth = 1;
+  for (let i = from; i < line.length; i += 1) {
+    const ch = line[i]!;
+    if (ch === "\\") i += 1;
+    else if (ch === "'" || ch === '"') {
+      const close = line.indexOf(ch, i + 1);
+      if (close < 0) return -1;
+      i = close;
+    } else if (ch === "(") depth += 1;
+    else if (ch === ")") {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+const SUBST = "\u0001";
+const ASSIGN_PREFIX = /^[A-Za-z_][A-Za-z0-9_]*=$/;
+
+function tokenize(line: string, level = 0): Segment[] {
   const segments: Segment[] = [];
+  let noClose = false;
   let tokens: string[] = [];
   let word = "";
   let inWord = false;
@@ -313,6 +338,25 @@ function tokenize(line: string): Segment[] {
       if (ch === "'") quote = null;
       else word += ch;
       continue;
+    }
+    if (
+      (ch === "`" || (ch === "$" && line[i + 1] === "(")) &&
+      level < 4 &&
+      !noClose &&
+      ASSIGN_PREFIX.test(word)
+    ) {
+      // VAR=$(cmd) or VAR=`cmd`: keep the substitution in the word, check cmd as a command of its own.
+      const start = ch === "`" ? i + 1 : i + 2;
+      const end = ch === "`" ? line.indexOf("`", start) : matchParen(line, start);
+      if (end >= 0) {
+        const inner = line.slice(start, end);
+        segments.push(...tokenize(inner, level + 1));
+        word += `${SUBST}${inner}${SUBST}`;
+        inWord = true;
+        i = end;
+        continue;
+      }
+      noClose = true;
     }
     if (quote === '"') {
       if (ch === '"') quote = null;
@@ -930,6 +974,102 @@ function splitArgsAfterOptions(args: string[], valued: ReadonlyArray<string>): s
   return args.slice(i);
 }
 
+type Vars = Map<string, string | null>;
+
+const MAX_VALUE = 4096;
+const DECLARE = new Set(["export", "local", "readonly", "declare", "typeset"]);
+
+function expandVars(word: string, vars: Vars, ctx: DenylistContext): string {
+  if (!word.includes("$")) return word;
+  return word.replace(
+    /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+    (match, braced: string | undefined, plain: string | undefined) => {
+      const name = braced ?? plain!;
+      let value: string | null | undefined = vars.get(name);
+      if (value === undefined) {
+        if (name === "TMPDIR") value = "/tmp";
+        else if (name === "HOME") value = ctx.home ?? NodeOS.homedir();
+        else if (name === "PWD") value = ctx.cwd;
+      }
+      return value === null || value === undefined ? match : value;
+    },
+  );
+}
+
+function mktempValue(args: string[], ctx: DenylistContext): string | null {
+  let dir: string | null = null;
+  let useTmpdir = false;
+  let template: string | null = null;
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i]!;
+    if (a === "--tmpdir") useTmpdir = true;
+    else if (a.startsWith("--tmpdir=")) {
+      useTmpdir = true;
+      dir = a.slice("--tmpdir=".length);
+    } else if (a.startsWith("--")) continue;
+    else if (a.startsWith("-") && a.length > 1) {
+      for (const flag of a.slice(1)) {
+        if (flag === "t") useTmpdir = true;
+        if (flag === "p") {
+          dir = args[i + 1] ?? null;
+          useTmpdir = true;
+          i += 1;
+        }
+      }
+    } else template ??= a;
+  }
+  const base = dir ?? "/tmp";
+  let value: string | null;
+  if (template === null) value = `${base}/tmp.XXXXXXXXXX`;
+  else if (NodePath.posix.isAbsolute(template)) value = template;
+  else if (useTmpdir) value = `${base}/${template}`;
+  else value = ctx.cwd === null ? null : `${ctx.cwd}/${template}`;
+  return value === null || value.includes("$") || value.includes("`") ? null : value;
+}
+
+function substitutionValue(inner: string, vars: Vars, ctx: DenylistContext): string | null {
+  const segments = tokenize(inner, 4);
+  if (segments.length !== 1 || segments[0]!.writes.length > 0) return null;
+  const words = stripPrefix(segments[0]!.words).map((w) => expandVars(w, vars, ctx));
+  const command = baseName(words[0] ?? "");
+  if (command === "pwd") return ctx.cwd;
+  if (command === "mktemp") return mktempValue(words.slice(1), ctx);
+  return null;
+}
+
+/** Value of a simple assignment, or null when it cannot be known. */
+function assignedValue(raw: string, vars: Vars, ctx: DenylistContext): string | null {
+  let unknown = false;
+  const text = raw.replace(
+    new RegExp(`${SUBST}([^${SUBST}]*)${SUBST}`, "g"),
+    (_m, inner: string) => {
+      const value = substitutionValue(inner, vars, ctx);
+      if (value === null) unknown = true;
+      return value ?? "";
+    },
+  );
+  if (unknown) return null;
+  const value = expandVars(text, vars, ctx);
+  if (value.includes("$") || value.includes("`") || value.length > MAX_VALUE) return null;
+  return value;
+}
+
+/** Applies a segment made only of assignments (also behind export/local/...). False when it is a command. */
+function applyAssignments(words: string[], vars: Vars, ctx: DenylistContext): boolean {
+  let i = 0;
+  if (DECLARE.has(words[0] ?? "")) {
+    i = 1;
+    while (i < words.length && words[i]!.startsWith("-")) i += 1;
+  }
+  const rest = words.slice(i);
+  if (rest.length === 0 || !rest.every((w) => ASSIGNMENT.test(w))) return false;
+  for (const word of rest) {
+    const eq = word.indexOf("=");
+    vars.set(word.slice(0, eq), assignedValue(word.slice(eq + 1), vars, ctx));
+  }
+  return true;
+}
+
 function cdTarget(words: string[], ctx: DenylistContext): string | null | undefined {
   const name = baseName(words[0] ?? "");
   if (name === "popd") return null;
@@ -948,11 +1088,19 @@ export function checkBash(command: string, start: DenylistContext, depth = 0): s
   const { main, bodies } = splitHeredocs(command);
   const segments = tokenize(main);
   let cwd = ctx.cwd;
+  const vars: Vars = new Map();
   for (const segment of segments) {
     const local = cwd === ctx.cwd ? ctx : { ...ctx, cwd };
-    const redirect = checkRedirects(segment.writes, local);
+    const redirect = checkRedirects(
+      segment.writes.map((w) => expandVars(w, vars, local)),
+      local,
+    );
     if (redirect !== null) return redirect;
-    const words = stripPrefix(segment.words);
+    if (applyAssignments(segment.words, vars, local)) continue;
+    const words = stripPrefix(segment.words.map((w) => expandVars(w, vars, local)));
+    if (words[0] === "unset") {
+      for (const name of words.slice(1)) vars.set(name, null);
+    }
     const verdict = checkWords(words, local, depth);
     if (verdict !== null) return verdict;
     const moved = cdTarget(words, local);
