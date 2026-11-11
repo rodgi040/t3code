@@ -68,8 +68,9 @@ describe("fp:activity v2 states", () => {
       [2002, "t-2002", "approval"],
       [2003, "t-2003", "input"],
       [2004, "t-2004", "error"],
-      [2005, "t-2005", "error"],
     ]);
+    // An interrupted run leaves no entry.
+    expect(states.some((s) => s.ticket === 2005)).toBe(false);
     // tickets keeps the old meaning: working only.
     expect(await workingTickets(getFlightplanChat(), shells, lookup)).toEqual([2001]);
   });

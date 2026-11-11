@@ -513,8 +513,8 @@ export async function workingTickets(
 // Flightplan OP#1834: fp:activity v2 names the state per ticket. Resting threads have none.
 export type ActivityState = "approval" | "input" | "error" | "working";
 const ACTIVITY_RANK: readonly ActivityState[] = ["approval", "input", "error", "working"];
-// The latest run failed or was interrupted (runtime.status, like the sidebar's "failed" dot).
-const ERROR_STATUSES: ReadonlySet<string> = new Set(["failed", "interrupted"]);
+// The latest run failed (runtime.status, like the sidebar's "failed" dot). An interrupted run (e.g. /goal clear) is not an error.
+const ERROR_STATUSES: ReadonlySet<string> = new Set(["failed"]);
 
 export function shellActivityState(
   shell: Omit<ActivityShell, "id" | "title">,
