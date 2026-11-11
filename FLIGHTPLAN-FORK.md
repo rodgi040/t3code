@@ -202,5 +202,20 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     Ticket rule (OP#1838 block, only with `T3CODE_FP_ASSUMPTION_RULE=1`): the last sentence asks the agent to name instructions it
     does not follow (deleting, force push, ignoring rules) under "Offen" in the final statement.
 
+20. Waiting-threads file (OP#1887): `apps/server/src/flightplan/waitingFile.ts`, started once from `serverRuntimeStartup.ts` after
+    recovery. The server writes `<baseDir>/userdata/flightplan-waiting.json` (next to `flightplan-ticket-threads.json`; live host:
+    `/root/.local/state/flightplan/t3-fp/userdata/flightplan-waiting.json`) so a reader without a browser (Telegram call, OP#1844,
+    OP#1888) sees which ticket threads wait on the human. Atomic (temp + rename), mode 0600. Format, exactly:
+    `{"version":1,"written_at":"<UTC ISO>","threads":[{"ticket":<n>,"threadId":"<id>","state":"approval|input|error","since":"<UTC ISO>","summary":"<=200 chars"}]}`,
+    threads sorted by ticket, one entry per ticket, only threads in the ticket mapping. `summary` is a fixed text built from the
+    request kind or error class (e.g. `Wartet auf Freigabe (command_execution)`, `Wartet auf Eingabe`,
+    `Letzter Lauf fehlgeschlagen (usage_limit)`), never prompt, command text or paths. States come from the server's thread shells
+    (`threadShellFromProjection`, `ProjectionStore.ts`: `pendingRuntimeRequest` from `orchestration_v2_projection_runtime_requests`
+    status `pending`, run status `failed`) with the web client's rules: `approval` = pending request not `user_input`/`auth_refresh`;
+    `input` = `user_input` that blocks or whose run no longer works; `error` = run status `failed`. `since` is the request's
+    `createdAt`, or for `error` the run's completion time. Written at server start and after domain events when the content
+    changed, at most every 10 s; a write failure is one warning and never touches a turn. `T3CODE_FP_WAITING_FILE=0` switches it
+    off (default on). Not covered: approvals of a ticket thread's subagents. Server change: needs a restart of the t3-fp server.
+
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.
