@@ -833,8 +833,8 @@ interface PendingForward {
 }
 
 const PENDING_STORE_KEY = "fp:forward-pending";
-export const PENDING_FORWARD_MAX = 20;
-export const PENDING_FORWARD_TTL_MS = 24 * 60 * 60 * 1000;
+const PENDING_FORWARD_MAX = 20;
+const PENDING_FORWARD_TTL_MS = 24 * 60 * 60 * 1000;
 const SENT_KEYS: Record<ForwardKind, string> = {
   answer: ANSWER_STORE_KEY,
   assumption: ASSUMPTION_STORE_KEY,
@@ -984,7 +984,7 @@ export function parseAnswerContinuation(data: unknown): AnswerContinuation | nul
   return answer ? { questionId, ticket, answer } : null;
 }
 
-export function answerTurnText(answer: string): string {
+function answerTurnText(answer: string): string {
   return `Antwort auf die Rückfrage: ${answer}`;
 }
 
@@ -1036,7 +1036,7 @@ export function parseAssumption(data: unknown): AssumptionDecision | null {
   return { assumptionId, ticket, decision: message.decision, text, note };
 }
 
-export function assumptionTurnText(item: AssumptionDecision): string {
+function assumptionTurnText(item: AssumptionDecision): string {
   if (item.decision === "confirmed") return `Annahme bestätigt: ${item.text}`;
   const hint = item.note ? ` Hinweis: ${item.note}.` : "";
   return `Annahme verworfen: ${item.text}.${hint} Baue nicht weiter darauf auf.`;

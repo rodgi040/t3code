@@ -30,7 +30,7 @@ export interface TicketThreadCommands {
 }
 
 /** fp:start lost the race: the server record already belongs to another thread (another tab was faster). */
-export class TicketThreadClaimLostError extends Error {
+class TicketThreadClaimLostError extends Error {
   constructor(readonly threadId: string) {
     super("Das Ticket hat schon einen Thread.");
     this.name = "TicketThreadClaimLostError";
@@ -109,7 +109,7 @@ export async function sendTicketStart(input: {
   }
 }
 
-export function claudeSelection(project: Pick<EnvironmentProject, "defaultModelSelection">) {
+function claudeSelection(project: Pick<EnvironmentProject, "defaultModelSelection">) {
   if (project.defaultModelSelection?.instanceId === "claudeAgent") {
     return project.defaultModelSelection;
   }
