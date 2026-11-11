@@ -1,10 +1,19 @@
 import { useEffect, useRef } from "react";
 
 import { newMessageId } from "../lib/utils";
-import { useProjects, useThreadShells } from "../state/entities";
+import {
+  useAllEnvironmentShellsBootstrapped,
+  useProjects,
+  useThreadShells,
+} from "../state/entities";
 import { threadEnvironment } from "../state/threads";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
-import { reportActivity, setTicketTurnHost, type TicketTurnHost } from "./channel";
+import {
+  reportActivity,
+  retryPendingForwards,
+  setTicketTurnHost,
+  type TicketTurnHost,
+} from "./channel";
 import { flightplanFrameFull } from "./embed";
 import { createTicketThread, ticketStartPrompt } from "./ticketThread";
 
@@ -21,19 +30,26 @@ export function FlightplanActivity() {
   const projects = useProjects();
   const createThread = useOrchestrationCommand(threadEnvironment.create, { reportFailure: false });
   const startTurn = useOrchestrationCommand(threadEnvironment.startTurn, { reportFailure: false });
-  const latest = useRef({ shells, projects, createThread, startTurn });
+  const shellsReady = useAllEnvironmentShellsBootstrapped();
+  const deleteThread = useOrchestrationCommand(threadEnvironment.delete, { reportFailure: false });
+  const latest = useRef({ shells, projects, createThread, startTurn, deleteThread, shellsReady });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the registered host reads the newest shells, projects and commands without re-registering
   useEffect(() => {
-    latest.current = { shells, projects, createThread, startTurn };
+    latest.current = { shells, projects, createThread, startTurn, deleteThread, shellsReady };
   });
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mirrors agent activity to the OpenProject parent frame (fp:activity) and repeats it so a dashboard that missed one catches up
   useEffect(() => {
     if (!full) return;
     void reportActivity(shells);
-    const timer = window.setInterval(() => void reportActivity(shells, true), REPEAT_MS);
+    // OP#1840: the same beat retries answers and assumption notes that could not be sent yet.
+    if (shellsReady) void retryPendingForwards();
+    const timer = window.setInterval(() => {
+      void reportActivity(shells, true);
+      if (shellsReady) void retryPendingForwards();
+    }, REPEAT_MS);
     return () => window.clearInterval(timer);
-  }, [full, shells]);
+  }, [full, shells, shellsReady]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers the background turn host of the channel while this frame is the dashboard split
   useEffect(() => {
@@ -50,22 +66,30 @@ export function FlightplanActivity() {
           modelSelection: shell.modelSelection,
           runtimeMode: shell.runtimeMode,
           interactionMode: shell.interactionMode,
+          // OP#1840: behind a running turn the text is queued, never steered into it.
+          dispatchMode: "queue",
         },
       });
       return result._tag !== "Failure";
     };
     const host: TicketTurnHost = {
+      ready: () => latest.current.shellsReady,
       shells: () => latest.current.shells,
       sendTurn,
       startExisting: (threadId, ticket) => sendTurn(threadId, ticketStartPrompt(String(ticket))),
       startNew: async (ticket) => {
-        const { projects: all, createThread: create, startTurn: run } = latest.current;
+        const {
+          projects: all,
+          createThread: create,
+          startTurn: run,
+          deleteThread: remove,
+        } = latest.current;
         const project = all.find((item) => item.archivedAt == null);
         if (!project) throw new Error("Kein Projekt in T3.");
         const record = await createTicketThread({
           ticketId: String(ticket),
           project,
-          commands: { createThread: create, startTurn: run },
+          commands: { createThread: create, startTurn: run, deleteThread: remove },
           startAgent: true,
           strictStart: true,
         });
@@ -73,6 +97,7 @@ export function FlightplanActivity() {
       },
     };
     setTicketTurnHost(host);
+    void retryPendingForwards();
     return () => setTicketTurnHost(null);
   }, [full]);
 

@@ -11,6 +11,8 @@ import {
   parseAnswerContinuation,
   parseAssumption,
   resetTicketStarts,
+  retryPendingForwards,
+  acceptParentSource,
   setTicketTurnHost,
   type ActivityShell,
   type TicketTurnHost,
@@ -30,6 +32,7 @@ function shell(id: string, ticket: number, status = "idle", extra: Partial<Activ
 
 function setup(shells: ActivityShell[], records: Record<number, string> = {}) {
   const host = {
+    ready: () => true,
     shells: () => shells,
     startNew: vi.fn(async (ticket: number) => `new-${ticket}`),
     startExisting: vi.fn(async () => true),
@@ -162,7 +165,7 @@ describe("continuation after an answer (OP#1840)", () => {
     const ctx = setup([shell("t-1", 1840)], { 1840: "t-1" });
     const continuation = parseAnswerContinuation(answered)!;
     expect(await forwardAnswer(continuation, ctx)).toBe(true);
-    expect(await forwardAnswer(continuation, ctx)).toBe(false);
+    expect(await forwardAnswer(continuation, ctx)).toBe(true);
     expect(ctx.host.sendTurn).toHaveBeenCalledTimes(1);
   });
 
@@ -231,7 +234,7 @@ describe("assumption decision (OP#1840)", () => {
       "t-1",
       "Annahme verworfen: Wir nehmen Postgres.. Hinweis: Bitte SQLite. Baue nicht weiter darauf auf.",
     );
-    expect(await forwardAssumption(rejected, ctx)).toBe(false);
+    expect(await forwardAssumption(rejected, ctx)).toBe(true);
     expect(ctx.host.sendTurn).toHaveBeenCalledTimes(2);
   });
 
@@ -301,5 +304,156 @@ describe("origin and wiring through applyParentMessage (OP#1840)", () => {
     expect(posted[0]).toMatchObject({ type: "fp:started", ticket: 1840, result: "accepted" });
     setTicketTurnHost(null);
     vi.unstubAllGlobals();
+  });
+});
+
+describe("review follow-up (OP#1840)", () => {
+  beforeEach(() => resetTicketStarts());
+
+  it("rejects fp:start with error while the threads are not loaded", async () => {
+    const ctx = setup([]);
+    const host = { ...ctx.host, ready: () => false };
+    await handleStart(1840, { ...ctx, host });
+    expect(started(ctx.target)[0]).toMatchObject({ result: "rejected", reason: "error" });
+    expect(ctx.host.startNew).not.toHaveBeenCalled();
+  });
+
+  it("starts two parallel fp:start for the same ticket only once", async () => {
+    const ctx = setup([]);
+    await Promise.all([handleStart(1840, ctx), handleStart(1840, ctx)]);
+    expect(ctx.host.startNew).toHaveBeenCalledTimes(1);
+    const results = started(ctx.target)
+      .map((m) => m.result)
+      .toSorted();
+    expect(results).toEqual(["accepted", "rejected"]);
+  });
+
+  it("does not exceed the slot limit with parallel starts of different tickets", async () => {
+    const ctx = setup([]);
+    await Promise.all([1, 2, 3, 4, 5, 6].map((n) => handleStart(n, ctx)));
+    expect(ctx.host.startNew).toHaveBeenCalledTimes(TICKET_SLOT_LIMIT);
+    expect(started(ctx.target).filter((m) => m.reason === "slots")).toHaveLength(2);
+  });
+
+  it("reports running when another tab won the claim race", async () => {
+    const ctx = setup([]);
+    ctx.host.startNew = vi.fn(async () => {
+      const error = new Error("lost");
+      error.name = "TicketThreadClaimLostError";
+      throw error;
+    });
+    await handleStart(1840, ctx);
+    expect(started(ctx.target)[0]).toMatchObject({ result: "rejected", reason: "running" });
+  });
+
+  it("keeps an answer pending while the thread waits, then sends it once and reports", async () => {
+    const waiting = shell("t-1", 1840, "idle", { hasPendingApprovals: true });
+    const shells = [waiting];
+    const ctx = setup(shells, { 1840: "t-1" });
+    const continuation = parseAnswerContinuation({
+      type: "fp:answered",
+      questionId: 7,
+      ok: true,
+      ticket: 1840,
+      answer: "A",
+    })!;
+    expect(await forwardAnswer(continuation, ctx)).toBe(false);
+    expect(started(ctx.target)[0]).toEqual({
+      type: "fp:forwarded",
+      kind: "answer",
+      id: 7,
+      ticket: 1840,
+      result: "pending",
+    });
+    expect(ctx.host.sendTurn).not.toHaveBeenCalled();
+    // still waiting: the beat changes nothing
+    await retryPendingForwards(ctx);
+    expect(ctx.host.sendTurn).not.toHaveBeenCalled();
+    shells[0] = shell("t-1", 1840, "idle");
+    await Promise.all([retryPendingForwards(ctx), retryPendingForwards(ctx)]);
+    expect(ctx.host.sendTurn).toHaveBeenCalledTimes(1);
+    expect(started(ctx.target).at(-1)).toMatchObject({ kind: "answer", id: 7, result: "sent" });
+    await retryPendingForwards(ctx);
+    expect(ctx.host.sendTurn).toHaveBeenCalledTimes(1);
+    // a repeated delivery of the same question is not sent again
+    expect(await forwardAnswer(continuation, ctx)).toBe(true);
+    expect(ctx.host.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an assumption pending until the host is registered and loaded", async () => {
+    const ctx = setup([shell("t-1", 1840)], { 1840: "t-1" });
+    const item = parseAssumption({
+      type: "fp:assumption",
+      ticket: 1840,
+      assumptionId: 5,
+      decision: "confirmed",
+      text: "X",
+    })!;
+    await forwardAssumption(item, { ...ctx, host: null });
+    expect(started(ctx.target)[0]).toMatchObject({ kind: "assumption", result: "pending" });
+    await retryPendingForwards({ ...ctx, host: { ...ctx.host, ready: () => false } });
+    expect(ctx.host.sendTurn).not.toHaveBeenCalled();
+    await retryPendingForwards(ctx);
+    expect(ctx.host.sendTurn).toHaveBeenCalledWith("t-1", "Annahme bestätigt: X");
+    expect(started(ctx.target).at(-1)).toMatchObject({ kind: "assumption", id: 5, result: "sent" });
+  });
+
+  it("reports no-thread and drops pending entries older than 24 hours", async () => {
+    const ctx = setup([shell("t-1", 1840)], {});
+    const continuation = parseAnswerContinuation({
+      type: "fp:answered",
+      questionId: 8,
+      ok: true,
+      ticket: 1840,
+      answer: "B",
+    })!;
+    await forwardAnswer(continuation, ctx);
+    expect(started(ctx.target)[0]).toMatchObject({ result: "no-thread" });
+    // pending entry with expiry
+    const waiting = setup([shell("t-1", 1840, "idle", { hasPendingUserInput: true })], {
+      1840: "t-1",
+    });
+    await forwardAnswer({ ...continuation, questionId: 9 }, { ...waiting, now: () => 1000 });
+    await retryPendingForwards({
+      ...waiting,
+      host: { ...waiting.host, shells: () => [shell("t-1", 1840)] },
+      now: () => 1000 + 25 * 60 * 60 * 1000,
+    });
+    expect(waiting.host.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it("keeps at most 20 pending entries", async () => {
+    const ctx = setup([shell("t-1", 1840, "idle", { hasPendingUserInput: true })], {
+      1840: "t-1",
+    });
+    for (let id = 1; id <= 25; id++) {
+      await forwardAnswer({ questionId: id, ticket: 1840, answer: "x" }, ctx);
+    }
+    const stored = JSON.parse(ctx.storage.getItem("fp:forward-pending") ?? "[]") as {
+      id: number;
+    }[];
+    expect(stored).toHaveLength(20);
+    expect(stored[0]?.id).toBe(6);
+  });
+
+  it("never sends into a thread the server assigns to another ticket", async () => {
+    // Thread t-1 is titled for ticket 1840, but the server gives ticket 1840 to t-2.
+    const ctx = setup([shell("t-1", 1840), shell("t-2", 7)], { 1840: "t-2" });
+    await forwardAnswer({ questionId: 11, ticket: 1840, answer: "x" }, ctx);
+    expect(ctx.host.sendTurn).toHaveBeenCalledWith("t-2", "Antwort auf die Rückfrage: x");
+    expect(ctx.host.sendTurn).not.toHaveBeenCalledWith("t-1", expect.anything());
+    // and for the slot count the foreign thread does not count as a working ticket 1840
+    resetTicketStarts();
+    const other = setup([shell("t-1", 1840, "running")], { 1840: "t-9" });
+    await handleStart(1840, other);
+    expect(started(other.target)[0]).toMatchObject({ result: "rejected", reason: "error" });
+  });
+
+  it("accepts a message only from the parent window", () => {
+    const parent = {};
+    expect(acceptParentSource(parent, parent)).toBe(true);
+    expect(acceptParentSource({}, parent)).toBe(false);
+    expect(acceptParentSource(null, parent)).toBe(false);
+    expect(acceptParentSource(undefined, undefined)).toBe(false);
   });
 });

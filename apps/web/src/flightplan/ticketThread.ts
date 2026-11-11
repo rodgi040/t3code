@@ -22,6 +22,16 @@ type CommandRunner<C> =
 export interface TicketThreadCommands {
   readonly createThread: CommandRunner<typeof threadEnvironment.create>;
   readonly startTurn: CommandRunner<typeof threadEnvironment.startTurn>;
+  /** Only used by fp:start to remove the empty thread of a lost claim race. */
+  readonly deleteThread?: CommandRunner<typeof threadEnvironment.delete>;
+}
+
+/** fp:start lost the race: the server record already belongs to another thread (another tab was faster). */
+export class TicketThreadClaimLostError extends Error {
+  constructor(readonly threadId: string) {
+    super("Das Ticket hat schon einen Thread.");
+    this.name = "TicketThreadClaimLostError";
+  }
 }
 
 /** Flightplan OP#1802: the first turn of a ticket's chat, sent when the dashboard opens or starts the ticket. */
@@ -97,6 +107,16 @@ export async function createTicketThread(input: {
   });
   if (!put.ok) throw new Error(`Thread-Zuordnung ${put.status}`);
   const record = (await put.json()) as TicketThreadRecord;
+  if (strictStart && (!record.created || record.threadId !== threadId)) {
+    // Our thread is an orphan now; delete it while it is still empty (best effort).
+    await commands
+      .deleteThread?.({
+        environmentId: project.environmentId,
+        input: { threadId, onlyIfUnused: true },
+      })
+      .catch(() => undefined);
+    throw new TicketThreadClaimLostError(record.threadId);
+  }
   // OP#1802: only the dashboard starts the agent, and only for the thread this call created.
   if (startAgent && record.created && record.threadId === threadId) {
     const started = await commands.startTurn({

@@ -104,6 +104,17 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     - `{type:"fp:assumption", ticket, assumptionId, decision:"confirmed"|"rejected", text, note|null}`: sends
       `Annahme bestätigt: <text>` or `Annahme verworfen: <text>. Hinweis: <note>. Baue nicht weiter darauf auf.`
       Once per `assumptionId` (`fp:assumption-forwarded`).
+      Review follow-up (Nachtrag 1): the channel listener also requires `event.source === window.parent`. `fp:start`
+      answers `rejected`/`error` until all environments delivered their thread shells (`useAllEnvironmentShellsBootstrapped`).
+      If the server record already belongs to another thread (another tab was faster), `fp:start` answers
+      `rejected`/`running` and deletes its own empty thread (`thread.delete` with `onlyIfUnused`). Turns for answers
+      and assumptions use `dispatchMode: "queue"`, so they wait behind a running turn and never steer or interrupt it.
+    - `{type:"fp:forwarded", kind:"answer"|"assumption", id, ticket, result:"sent"|"pending"|"no-thread"}` (T3 to OP)
+      after each attempt. `pending`: threads not loaded, host not registered, or the thread waits for approval or
+      input. Such items are kept in `sessionStorage` (`fp:forward-pending`, at most 20, dropped after 24 h) and tried
+      again on the activity beat (on change and every 30 s) and when the host registers; `sent` is reported then.
+      `no-thread`: the ticket has no thread (not kept). An item is sent at most once (`fp:answered-forwarded`,
+      `fp:assumption-forwarded`).
 
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.
