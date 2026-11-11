@@ -2,7 +2,9 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { DateTime } from "effect";
+import { it as effectIt } from "@effect/vitest";
+import { DateTime, Effect, Queue, Stream } from "effect";
+import { TestClock } from "effect/testing";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -10,8 +12,10 @@ import {
   deriveWaitingState,
   renderWaitingFile,
   waitingFileEnabled,
+  startWaitingFile,
   waitingFilePath,
   writeWaitingFile,
+  type WaitingFileSource,
   type WaitingShellInput,
 } from "./waitingFile.ts";
 
@@ -122,4 +126,105 @@ describe("flightplan waiting file", () => {
     expect(waitingFileEnabled({ T3CODE_FP_WAITING_FILE: "0" })).toBe(false);
     expect(waitingFileEnabled({ T3CODE_FP_WAITING_FILE: "1" })).toBe(true);
   });
+});
+
+describe("flightplan waiting file loop", () => {
+  const tmpBase = () => NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "fp-waiting-loop-"));
+  const mapTicket = (base: string) => {
+    NodeFS.mkdirSync(NodePath.join(base, "userdata"), { recursive: true });
+    NodeFS.writeFileSync(
+      NodePath.join(base, "userdata", "flightplan-ticket-threads.json"),
+      JSON.stringify({ "7": { threadId: "thread-1", environmentId: "e", projectId: "p" } }),
+    );
+  };
+  const readFile = (base: string) =>
+    JSON.parse(NodeFS.readFileSync(waitingFilePath(base), "utf8")) as {
+      written_at: string;
+      threads: Array<{ since: string }>;
+    };
+  const makeSource = (state: { shells: unknown[] }, events: Stream.Stream<unknown, unknown>) =>
+    ({
+      getShellSnapshot: () => Effect.sync(() => ({ threads: state.shells })),
+      streamDomainEvents: events,
+    }) as unknown as WaitingFileSource;
+  const approval = [shell({ pendingRuntimeRequest: request("command_execution") })].map((row) => ({
+    ...row,
+    id: "thread-1",
+  }));
+
+  effectIt.effect("heartbeat renews written_at and keeps threads and since", () =>
+    Effect.gen(function* () {
+      const base = tmpBase();
+      mapTicket(base);
+      yield* startWaitingFile({
+        baseDir: base,
+        source: makeSource({ shells: approval }, Stream.never),
+        env: {},
+      });
+      yield* Effect.yieldNow;
+      const first = readFile(base);
+      yield* TestClock.adjust("59 seconds");
+      expect(readFile(base).written_at).toBe(first.written_at);
+      yield* TestClock.adjust("2 seconds");
+      const second = readFile(base);
+      expect(second.written_at).not.toBe(first.written_at);
+      expect(second.threads).toEqual(first.threads);
+      expect(second.threads).toHaveLength(1);
+    }).pipe(Effect.scoped),
+  );
+
+  effectIt.effect("throttle delays an event by 10 s but does not lose it", () =>
+    Effect.gen(function* () {
+      const base = tmpBase();
+      mapTicket(base);
+      const state = { shells: [] as unknown[] };
+      const events = yield* Queue.unbounded<number>();
+      yield* startWaitingFile({
+        baseDir: base,
+        source: makeSource(state, Stream.fromQueue(events)),
+        env: {},
+      });
+      yield* Effect.yieldNow;
+      expect(readFile(base).threads).toEqual([]);
+      state.shells = approval;
+      yield* Queue.offer(events, 1);
+      yield* TestClock.adjust("9 seconds");
+      expect(readFile(base).threads).toEqual([]);
+      yield* TestClock.adjust("1 seconds");
+      expect(readFile(base).threads).toHaveLength(1);
+    }).pipe(Effect.scoped),
+  );
+
+  effectIt.effect("creates a missing folder, survives a write failure and retries", () =>
+    Effect.gen(function* () {
+      const base = tmpBase();
+      const file = waitingFilePath(base);
+      NodeFS.mkdirSync(file, { recursive: true });
+      yield* startWaitingFile({
+        baseDir: base,
+        source: makeSource({ shells: [] }, Stream.never),
+        env: {},
+      });
+      yield* Effect.yieldNow;
+      expect(NodeFS.statSync(file).isDirectory()).toBe(true);
+      NodeFS.rmSync(file, { recursive: true });
+      yield* TestClock.adjust("61 seconds");
+      expect(readFile(base).threads).toEqual([]);
+    }).pipe(Effect.scoped),
+  );
+
+  effectIt.effect("a failing event stream does not stop the heartbeat", () =>
+    Effect.gen(function* () {
+      const base = tmpBase();
+      yield* startWaitingFile({
+        baseDir: base,
+        source: makeSource({ shells: [] }, Stream.fail("boom")),
+        env: {},
+      });
+      yield* Effect.yieldNow;
+      const first = readFile(base).written_at;
+      yield* TestClock.adjust("61 seconds");
+      expect(readFile(base).written_at).not.toBe(first);
+    }).pipe(Effect.scoped),
+  );
 });

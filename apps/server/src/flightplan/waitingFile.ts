@@ -9,6 +9,7 @@ import * as NodePath from "node:path";
 import type { OrchestrationV2ThreadShell, ThreadId } from "@t3tools/contracts";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
@@ -21,6 +22,8 @@ const WAITING_FILE_ENV = "T3CODE_FP_WAITING_FILE";
 const WAITING_FILE_NAME = "flightplan-waiting.json";
 /** At most one write per this many milliseconds. */
 const WAITING_MIN_INTERVAL_MS = 10_000;
+/** The file is rewritten at least this often, so a reader can treat an old `written_at` as a dead server. */
+const WAITING_HEARTBEAT_MS = 60_000;
 const SUMMARY_MAX = 200;
 
 export type WaitingState = "approval" | "input" | "error";
@@ -165,13 +168,17 @@ export const startWaitingFile = (input: {
   readonly source: WaitingFileSource;
   readonly env?: NodeJS.ProcessEnv;
   readonly minIntervalMs?: number;
+  readonly heartbeatMs?: number;
 }) =>
   Effect.suspend(() => {
     if (!waitingFileEnabled(input.env)) return Effect.void;
     const file = waitingFilePath(input.baseDir);
     const minInterval = input.minIntervalMs ?? WAITING_MIN_INTERVAL_MS;
+    const heartbeat = input.heartbeatMs ?? WAITING_HEARTBEAT_MS;
     let lastKey: string | null = null;
+    let lastWriteMs = Number.NEGATIVE_INFINITY;
 
+    // Writes when the content (without written_at) changed, or when the last write is a heartbeat old.
     const refresh = Effect.gen(function* () {
       const ticketThreads = readTicketThreadMap(ticketThreadFile(input.baseDir));
       const threadIds = Object.values(ticketThreads).map((record) => record.threadId);
@@ -184,9 +191,11 @@ export const startWaitingFile = (input: {
             });
       const waiting = collectWaitingThreads(ticketThreads, snapshot.threads);
       const key = JSON.stringify(waiting);
-      if (key === lastKey) return;
-      writeWaitingFile(file, renderWaitingFile(waiting, new Date()));
+      const nowMs = yield* Clock.currentTimeMillis;
+      if (key === lastKey && nowMs - lastWriteMs < heartbeat) return;
+      writeWaitingFile(file, renderWaitingFile(waiting, new Date(nowMs)));
       lastKey = key;
+      lastWriteMs = nowMs;
     }).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("flightplan waiting file not written", { cause: Cause.pretty(cause) }),
@@ -195,9 +204,23 @@ export const startWaitingFile = (input: {
 
     return Effect.gen(function* () {
       const signals = yield* Queue.dropping<void>(1);
+      // The heartbeat re-reads the state itself; the event stream only makes it faster.
       yield* forkParked(
-        Stream.runForEach(input.source.streamDomainEvents, () =>
-          Queue.offer(signals, undefined),
+        Effect.gen(function* () {
+          yield* refresh;
+          while (true) {
+            const fromEvent = yield* Effect.race(
+              Queue.take(signals).pipe(Effect.as(true)),
+              Effect.sleep(heartbeat).pipe(Effect.as(false)),
+            );
+            if (fromEvent) yield* Effect.sleep(minInterval);
+            yield* refresh;
+          }
+        }),
+      );
+      yield* forkParked(
+        Effect.suspend(() =>
+          Stream.runForEach(input.source.streamDomainEvents, () => Queue.offer(signals, undefined)),
         ).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("flightplan waiting file stopped watching", {
@@ -205,16 +228,6 @@ export const startWaitingFile = (input: {
             }),
           ),
         ),
-      );
-      yield* forkParked(
-        Effect.gen(function* () {
-          yield* refresh;
-          while (true) {
-            yield* Queue.take(signals);
-            yield* Effect.sleep(minInterval);
-            yield* refresh;
-          }
-        }),
       );
     }).pipe(
       Effect.catchCause((cause) =>
