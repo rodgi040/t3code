@@ -380,6 +380,41 @@ describe("review follow-up (OP#1840)", () => {
     expect(ctx.host.sendTurn).toHaveBeenCalledTimes(1);
   });
 
+  describe("server slot limit (OP#1889)", () => {
+    const continuation = { questionId: 21, ticket: 1840, answer: "A" };
+    const busy = () => [1, 2, 3, 4].map((n) => shell(`s-${n}`, n, "running"));
+    const records = { 1: "s-1", 2: "s-2", 3: "s-3", 4: "s-4", 1840: "t-1" };
+
+    it("keeps the answer pending while four other threads work, then sends it once", async () => {
+      const shells = [...busy(), shell("t-1", 1840, "idle")];
+      const ctx = setup(shells, records);
+      expect(await forwardAnswer(continuation, ctx)).toBe(false);
+      expect(started(ctx.target)[0]).toMatchObject({ kind: "answer", id: 21, result: "pending" });
+      expect(ctx.host.sendTurn).not.toHaveBeenCalled();
+      shells[3] = shell("s-4", 4, "idle");
+      await Promise.all([retryPendingForwards(ctx), retryPendingForwards(ctx)]);
+      expect(ctx.host.sendTurn).toHaveBeenCalledTimes(1);
+      expect(started(ctx.target).at(-1)).toMatchObject({ id: 21, result: "sent" });
+      await retryPendingForwards(ctx);
+      expect(ctx.host.sendTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it("sends at once with a free slot, also when other threads only wait", async () => {
+      const shells = [...busy(), shell("t-1", 1840, "idle")];
+      shells[3] = shell("s-4", 4, "waiting");
+      const ctx = setup(shells, records);
+      expect(await forwardAnswer(continuation, ctx)).toBe(true);
+      expect(ctx.host.sendTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it("sends into a thread that is working itself", async () => {
+      const shells = [...busy(), shell("t-1", 1840, "running")];
+      const ctx = setup(shells, records);
+      expect(await forwardAnswer(continuation, ctx)).toBe(true);
+      expect(ctx.host.sendTurn).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("keeps an assumption pending until the host is registered and loaded", async () => {
     const ctx = setup([shell("t-1", 1840)], { 1840: "t-1" });
     const item = parseAssumption({

@@ -26,6 +26,7 @@ import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
 import { enrichFlightplanPrompt } from "../flightplan/prompt.ts";
+import { checkTicketSlot } from "../flightplan/slots.ts";
 import {
   readTicketThreadMap,
   ticketForThread,
@@ -629,6 +630,25 @@ export const layer: Layer.Layer<
           });
           return;
         }
+      }
+      // Flightplan OP#1889: a ticket thread starts only while fewer than the limit of other ticket threads work.
+      const slot = yield* checkTicketSlot({
+        mapFile: () => ticketThreadFile(serverConfig.baseDir),
+        threadId: input.threadId,
+        requestedAt: run.requestedAt,
+        otherRunStatuses: projection.runs
+          .filter((candidate) => candidate.id !== run.id)
+          .map((candidate) => candidate.status),
+        store: projectionStore,
+      });
+      if (!slot.allowed) {
+        yield* settleStartFailure({
+          signal: "ticket-slot-limit",
+          title: "Kein Platz frei",
+          error: new Error(slot.message),
+          message: slot.message,
+        });
+        return;
       }
       const { worktreePath, branch } = projection.thread;
       if (worktreePath !== null && branch !== null) {
