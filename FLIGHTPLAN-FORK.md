@@ -80,6 +80,8 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     --stdin`. The rule is off unless `T3CODE_FP_ASSUMPTION_RULE=1`; without it the prompt is exactly as before. The ticket number
     comes only from the fixed start of the turn (the `<ticket-context>` block's `Ticket #N` line or a start turn
     `Ticket #N wurde im ADA-Dashboard geöffnet.`), never from a `#<id>` elsewhere; otherwise no rule. Autostart is unchanged.
+    OP#1842 adds one line to the rule: ask with `fp-op ask <ticket> --question ... --option ... --recommend <option>
+    --kind entscheidung|freigabe|zugang|abnahme` and `--reversible` or `--irreversible` (same switch, server restart needed).
 15. Agent activity per ticket (OP#1802): `FlightplanActivity` (rendered from `AppSidebarLayout`, full layout only) posts
     `{type:"fp:activity"}` with the tickets whose thread has a turn in flight to `http://localhost:8090`, on change and
     every 30 s. A turn that waits for an approval or an answer does not count in `tickets`. Since OP#1834 the message is
@@ -129,6 +131,31 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
       again on the activity beat (on change and every 30 s) and when the host registers; `sent` is reported then.
       `no-thread`: the ticket has no thread (not kept). An item is sent at most once (`fp:answered-forwarded`,
       `fp:assumption-forwarded`).
+
+18. Open requests and answers from the dashboard (OP#1842, contract Phase 3 sections 1 and 2). Code in
+    `apps/web/src/flightplan/requests.ts`, host in `FlightplanActivity`; `channel.ts` only dispatches via
+    `registerParentHandler`, so origin and `event.source` checks apply unchanged. Web only, no server change besides item 14a.
+    - `{type:"fp:requests-get", ticket}` (OP to T3): the thread is the one the server record assigns to the ticket. If it
+      waits for approval or input (shell flags), its detail is subscribed through `environmentThreadDetails.quietThreadAtom`
+      (the open thread is not required; no subscription for other threads) and `derivePendingThreadRequests` is mapped.
+      Reply `{type:"fp:requests", ticket, threadId|null, items:[{requestId, kind:"question"|"approval", createdAt, answerable,
+      question?:{text, options:[{label, description|null, recommended}], multiSelect}, approval?:{detail, reason|null, tool|null}}]}`.
+      `threadId` is null (items empty) when no thread is assigned. `answerable:false`: several questions, multiSelect,
+      `not_resumable`, no custom answer and no options, or an approval without text, not live, or whose options lack
+      accept or decline. `recommended`: label ends with "(Recommended)" or "(Empfohlen)".
+    - Queried tickets are remembered (at most 50, in memory). On every activity beat (shell change, every 30 s with a
+      fresh server lookup) `refreshRequestWatches` starts a subscription for a queried ticket whose thread waits (at most 12),
+      sends `fp:requests` again when the items changed, and releases the subscription after sending empty items.
+      If the detail does not arrive within 8 s, empty items are sent once; a later arrival sends the real ones.
+    - `{type:"fp:respond", ticket, threadId, requestId, kind:"question", optionLabel | text}` or
+      `{..., kind:"approval", decision:"accept"|"decline"}`; reply `{type:"fp:responded", ticket, requestId, result:"ok"|"gone"|"error"}`.
+      `threadId` must equal the server record of the ticket, the request must be pending in that thread. `optionLabel` must equal
+      an option label exactly (the provider `value` is sent when the option has one); `text` is cleaned like item 17 and
+      cut at 4000 characters, refused when the question disallows custom answers. Approvals use only the decisions
+      `accept` and `decline` (single use), never `acceptForSession`, `acceptAlways` or a mode change. Each
+      `requestId` is answered once (memory plus `sessionStorage` key `fp:responded`); a repeat gets `gone`; a failed send
+      is not consumed. The answer goes through `respondToApproval`/`respondToUserInput` with the explicit `threadId`;
+      the chat's own hook (`usePendingThreadRequests`) is unchanged.
 
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.
