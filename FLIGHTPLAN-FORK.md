@@ -219,7 +219,7 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     `maxInThread >= 3`. **Limit:** while `t3-fp` runs as root, an agent can change or delete the file; the display is a hint,
     not a security proof (OP#1845). Server change: needs a restart of the t3-fp server.
 
-20. Waiting-threads file (OP#1887; number may collide with the seat-limit entry of PR #20, renumber on merge): `apps/server/src/flightplan/waitingFile.ts`, started once from `serverRuntimeStartup.ts` after
+21. Waiting-threads file (OP#1887): `apps/server/src/flightplan/waitingFile.ts`, started once from `serverRuntimeStartup.ts` after
     recovery. The server writes `<baseDir>/userdata/flightplan-waiting.json` (next to `flightplan-ticket-threads.json`; live host:
     `/root/.local/state/flightplan/t3-fp/userdata/flightplan-waiting.json`) so a reader without a browser (Telegram call, OP#1844,
     OP#1888) sees which ticket threads wait on the human. Atomic (temp + rename), mode 0600. Format, exactly:
@@ -238,7 +238,7 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     the run ends `failed` with class `provider_error`; this file then lists the thread as `error` ("Letzter Lauf fehlgeschlagen
     (provider_error)") and the call reports it after 15 minutes although only no seat was free. Server change: needs a restart of the t3-fp server.
 
-N. Slot limit for ticket threads (OP#1889; number to be set on merge): `apps/server/src/flightplan/slots.ts`, hooked into `ProviderTurnStartService.start`
+22. Slot limit for ticket threads (OP#1889): `apps/server/src/flightplan/slots.ts`, hooked into `ProviderTurnStartService.start`
 right before the workspace and provider session are prepared. For a thread the mapping file assigns to a ticket, at most
 `T3CODE_FP_SLOT_LIMIT` (default 4, `0` = off, invalid = 4) other mapped threads may be working. Working means the
 projection shell's active run is `preparing`, `starting` or `running`; `waiting` (approval or input) and `queued` do not count.
