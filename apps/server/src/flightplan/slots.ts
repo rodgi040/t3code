@@ -37,7 +37,6 @@ export type SlotDecision =
   | { readonly allowed: false; readonly tickets: ReadonlyArray<string>; readonly message: string };
 
 const COUNT_WORDS: Record<number, string> = {
-  1: "Ein",
   2: "Zwei",
   3: "Drei",
   4: "Vier",
@@ -47,9 +46,12 @@ const COUNT_WORDS: Record<number, string> = {
 
 export function slotRefusalMessage(tickets: ReadonlyArray<string>): string {
   const count = tickets.length;
-  const word = COUNT_WORDS[count] ?? String(count);
   const list = tickets.map((ticket) => `#${ticket}`).join(", ");
-  return `${word} Ticket-Threads arbeiten bereits (${list}). Dieser startet, sobald ein Platz frei ist, wenn du ihn erneut sendest.`;
+  const head =
+    count === 1
+      ? `Ein Ticket-Thread arbeitet bereits (${list}).`
+      : `${COUNT_WORDS[count] ?? String(count)} Ticket-Threads arbeiten bereits (${list}).`;
+  return `${head} Dieser Turn wurde nicht gestartet. Bitte sende ihn erneut, sobald ein Platz frei ist.`;
 }
 
 /**

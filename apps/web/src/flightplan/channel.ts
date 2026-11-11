@@ -725,6 +725,25 @@ function shellBusy(shell: ActivityShell): boolean {
   );
 }
 
+// OP#1889: the server counts a slot only for a run that is preparing, starting or running. Unlike BUSY_STATUSES
+// (fp:start, which also counts "waiting" threads) a thread waiting for a person does not hold a slot there, and neither does a queued one.
+const SERVER_SLOT_STATUSES: ReadonlySet<string> = new Set(["preparing", "starting", "running"]);
+
+/** True when the server would refuse a new turn for this ticket: the limit of other ticket threads is already working. */
+async function serverSlotsFull(
+  ticket: number,
+  shells: ReadonlyArray<ActivityShell>,
+  lookup: TicketThreadLookup,
+): Promise<boolean> {
+  const working = new Set<number>();
+  for (const shell of shells) {
+    if (!SERVER_SLOT_STATUSES.has(shell.runtime?.status ?? "idle")) continue;
+    const other = await verifiedTicket(state, shell, lookup);
+    if (other && other !== ticket) working.add(other);
+  }
+  return working.size >= TICKET_SLOT_LIMIT;
+}
+
 function shellAwaitsHuman(shell: ActivityShell): boolean {
   return Boolean(shell.hasPendingApprovals) || Boolean(shell.hasPendingUserInput);
 }
@@ -886,7 +905,7 @@ function postForwarded(
 
 /**
  * One delivery attempt. "pending": threads not loaded, host not registered, the thread waits for approval or input, or
- * the send failed. The turn is queued behind a running turn (dispatchMode queue), never steered into it.
+ * the send failed, or all slots are taken (OP#1889). The turn is queued behind a running turn (dispatchMode queue), never steered into it.
  */
 async function deliver(
   entry: PendingForward,
@@ -899,6 +918,13 @@ async function deliver(
   const shell = threadId ? host.shells().find((item) => item.id === threadId) : undefined;
   if (!threadId || !shell) return "no-thread";
   if (shellAwaitsHuman(shell)) return "pending";
+  // OP#1889: the server refuses a turn start while the limit is reached (a thread already working is only continued).
+  // Held as pending so the next beat sends it once a slot is free, instead of a failed run nobody retries.
+  if (
+    !SERVER_SLOT_STATUSES.has(shell.runtime?.status ?? "idle") &&
+    (await serverSlotsFull(entry.ticket, host.shells(), lookup))
+  )
+    return "pending";
   // Mark before the send so a second path cannot send the same item; undo if the send fails.
   if (!claimOnce(storage, SENT_KEYS[entry.kind], entry.id)) return "sent";
   try {

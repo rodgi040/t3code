@@ -202,18 +202,25 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     Ticket rule (OP#1838 block, only with `T3CODE_FP_ASSUMPTION_RULE=1`): the last sentence asks the agent to name instructions it
     does not follow (deleting, force push, ignoring rules) under "Offen" in the final statement.
 
-20. Slot limit for ticket threads (OP#1889): `apps/server/src/flightplan/slots.ts`, hooked into `ProviderTurnStartService.start`
-    right before the workspace and provider session are prepared. For a thread the mapping file assigns to a ticket, at most
-    `T3CODE_FP_SLOT_LIMIT` (default 4, `0` = off, invalid = 4) other mapped threads may be working. Working means the
-    projection shell's active run is `preparing`, `starting` or `running`; `waiting` (approval or input) and `queued` do not count.
-    Source: `listActiveShellIndex` plus `getThreadShell` of the mapped threads. A refused start settles the run as failed with an
-    error item ("Kein Platz frei", German text naming the busy tickets), which the thread shows in the chat; no queue, no restart,
-    the person sends again. Free chats and a thread that already has another working run (continuation) are not checked.
-    Race: runs are `starting` before this check, so a `starting` thread counts for a start only when it asked earlier
-    (request time, thread id as tie-break); of two simultaneous starts the later one is refused, never both. Reads are not one
-    transaction, so a start racing a status change can exceed the limit by at most one. A read error (map, store) lets the turn
-    start and logs a warning. The browser check in `channel.ts` keeps its constant 4; it does not follow the variable (no protocol
-    change). Server change: needs a restart of the t3-fp server.
+N. Slot limit for ticket threads (OP#1889; number to be set on merge): `apps/server/src/flightplan/slots.ts`, hooked into `ProviderTurnStartService.start`
+right before the workspace and provider session are prepared. For a thread the mapping file assigns to a ticket, at most
+`T3CODE_FP_SLOT_LIMIT` (default 4, `0` = off, invalid = 4) other mapped threads may be working. Working means the
+projection shell's active run is `preparing`, `starting` or `running`; `waiting` (approval or input) and `queued` do not count.
+Source: `listActiveShellIndex` plus `getThreadShell` of the mapped threads. A refused start settles the run as failed with an
+error item ("Kein Platz frei", German text naming the busy tickets), which the thread shows in the chat; no queue, no restart,
+the person sends again. Free chats and a thread that already has another working run (continuation) are not checked.
+Race: runs are `starting` before this check, so a `starting` thread counts for a start only when it asked earlier
+(request time, thread id as tie-break); of two simultaneous starts the later one is refused, never both. Reads are not one
+transaction, so a start racing a status change can exceed the limit by at most one. A read error (map, store) lets the turn
+start and logs a warning. The browser check in `channel.ts` keeps its constant 4; it does not follow the variable (no protocol
+change). Server change: needs a restart of the t3-fp server.
+Refused start: the run ends `failed` with failure class `provider_error` (the existing start-failure path). The client
+therefore shows it red, and the waiting-thread state file (PR #19) lists the thread as `error`. Counting differs on purpose:
+`fp:start` (browser) also counts threads that wait for approval or input (`BUSY_STATUSES`), so it never opens a fifth background
+thread; the server counts only `preparing`/`starting`/`running`, because a waiting thread does not occupy a builder. Answer and
+assumption forwards (`deliver` in `channel.ts`) use the server counting (`SERVER_SLOT_STATUSES`): with no free slot, and the
+target thread not working itself, the forward stays `pending` (same sessionStorage mechanism, retried on the beat) instead of
+producing a failed run that nobody retries. No new protocol field.
 
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.

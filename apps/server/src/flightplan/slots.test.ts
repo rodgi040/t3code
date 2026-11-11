@@ -59,7 +59,13 @@ describe("slots (pure)", () => {
 
   it("names the busy tickets in German", () => {
     expect(slotRefusalMessage(["1", "2", "3", "4"])).toBe(
-      "Vier Ticket-Threads arbeiten bereits (#1, #2, #3, #4). Dieser startet, sobald ein Platz frei ist, wenn du ihn erneut sendest.",
+      "Vier Ticket-Threads arbeiten bereits (#1, #2, #3, #4). Dieser Turn wurde nicht gestartet. Bitte sende ihn erneut, sobald ein Platz frei ist.",
+    );
+  });
+
+  it("uses singular for one thread", () => {
+    expect(slotRefusalMessage(["7"])).toBe(
+      "Ein Ticket-Thread arbeitet bereits (#7). Dieser Turn wurde nicht gestartet. Bitte sende ihn erneut, sobald ein Platz frei ist.",
     );
   });
 
