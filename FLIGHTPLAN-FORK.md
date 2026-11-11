@@ -59,6 +59,28 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     `channel.ts`, called from `ChatView`). `ticketId` is the ticket the parent opened for that thread, else a ticket named
     in the title (`Ticket #<id>`, `#<id> <Titel>`), else `null`. The dashboard moves its "Im Chat" mark with it. Repeats are
     dropped; the compact embed and standalone pages send nothing.
+13. Ticket bar in the dashboard split (OP#1784): in the full layout `FlightplanTicketBar` sits under `ChatHeader` with
+    number, title, status, project, type, priority, labels, assignee and a link to OpenProject. It is collapsible, opens
+    by itself when the ticket has an open question and keeps its state per ticket in `localStorage`. Questions, the
+    cleaned ticket history and the comment box live in the bar; the compact embed keeps them in the composer.
+    `fp:context` with `threadId` binds the ticket to exactly that thread. If the thread mapped to a ticket was deleted,
+    the ticket route shows a hint and offers a new chat; the server replaces the mapping only when the request names the
+    thread the client saw (`replaces` in `ticketThreads.ts`), otherwise the first thread wins.
+14. Session context once (OP#1803): `enrichFlightplanPrompt` in `apps/server/src/flightplan/prompt.ts` adds the fp-op hint
+    and the `Trace:` line only to the first turn of a thread (`firstTurn` from `ProviderTurnStartService`). Slash
+    commands (`/goal clear`, `/compact`, ...) reach the provider verbatim on every turn, and a `[[fp-trace:...]]` marker
+    is always stripped; `parseGoalCommand` ignores a marker from an older web build. The Langfuse trace is still created
+    per turn and carries the thread id as `sessionId`. Unchanged by design: a message that names `#<id>` gets that
+    ticket's `fp-op get` output appended (up to 8 KB) on every turn.
+15. Agent activity per ticket (OP#1802): `FlightplanActivity` (rendered from `AppSidebarLayout`, full layout only) posts
+    `{type:"fp:activity"}` with the tickets whose thread has a turn in flight to `http://localhost:8090`, on change and
+    every 30 s. A turn that waits for an approval or an answer does not count. The dashboard shows "Agent arbeitet" in
+    the ticket picker from it; the signal is transient and writes nothing to OpenProject. Concept:
+    Factory `Flightplan V1.0/_meta/planning/KONZEPT-OP1802-TICKET-ZUSTAND-20261110.md`.
+16. Start turn on the first open of a ticket (OP#1802): when the dashboard frame creates the thread for a ticket,
+    `_chat.embed.$ticketId.tsx` sends one start turn (state summary, open decisions, questions, change nothing).
+    Reopening the ticket, the compact workplace embed and a lost claim race send nothing. The ticket block goes out
+    while the thread has no user message yet (`useComposerSend.ts`).
 
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.
