@@ -379,10 +379,12 @@ export function spawnClaudeProcessGroup(
     if (code && stderrTail.length > 0) {
       // Stderr can carry prompts or paths: only print it with an explicit debug switch.
       if (process.env.T3CODE_DEBUG_CLAUDE_STDERR === "1") {
+        // @effect-diagnostics-next-line globalConsole:off - Node child exit handler outside the Effect runtime; stderr diagnostics
         console.error(
           `claude stderr (exit ${code}): ${Buffer.concat(stderrTail).toString("utf8").slice(-4000)}`,
         );
       } else {
+        // @effect-diagnostics-next-line globalConsole:off - Node child exit handler outside the Effect runtime; exit code diagnostics
         console.error(`claude exited with code ${code}`);
       }
     }

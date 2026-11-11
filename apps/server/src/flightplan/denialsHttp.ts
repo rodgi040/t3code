@@ -26,6 +26,7 @@ const handle = Effect.gen(function* () {
   }
   yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
   const summary = readDenialSummary(denialsFile(config.baseDir));
+  // @effect-diagnostics-next-line preferSchemaOverJson:off - serialises a plain summary object; no decoding involved
   return HttpServerResponse.text(JSON.stringify(summary), {
     status: 200,
     contentType: "application/json",

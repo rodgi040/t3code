@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - plain synchronous Node file code outside the Effect runtime (Flightplan module).
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -110,6 +111,7 @@ describe("flightplan waiting file", () => {
         summary: "Wartet auf Freigabe (command_execution)",
       },
     ];
+    // @effect-diagnostics-next-line globalDate:off - test fixture timestamp
     writeWaitingFile(file, renderWaitingFile(rows, new Date("2026-11-11T10:06:00Z")));
     expect(JSON.parse(NodeFS.readFileSync(file, "utf8"))).toEqual({
       version: 1,

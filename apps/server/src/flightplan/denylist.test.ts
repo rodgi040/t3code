@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off - plain synchronous Node file code outside the Effect runtime (Flightplan module).
+// @effect-diagnostics globalDate:off - wall-clock reads in this test file are test timing and fixtures, not Effect code.
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";

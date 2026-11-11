@@ -41,6 +41,7 @@
  * Limit: while `t3-fp` runs as root, an agent can change or delete that file. The count is a hint for the
  * human, not a security proof (OP#1845).
  */
+// @effect-diagnostics nodeBuiltinImport:off - plain synchronous Node file code outside the Effect runtime (Flightplan module).
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -125,6 +126,7 @@ export function denylistAppliesToThread(
 function warnBrokenMapping(file: string): void {
   if (warnedBrokenMapping) return;
   warnedBrokenMapping = true;
+  // @effect-diagnostics-next-line globalConsole:off - plain synchronous module with no Effect logger available; warns once on bad config
   console.warn(
     `[flightplan] OP#1868: ${file} cannot be read; the ticket-thread deny list is off for all threads.`,
   );
@@ -1389,6 +1391,7 @@ function appendDenial(
   target: DenialLogTarget,
   toolName: string,
   verdict: Denial,
+  // @effect-diagnostics-next-line globalDate:off - default argument of a plain synchronous writer
   now: Date = new Date(),
 ): void {
   try {

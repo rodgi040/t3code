@@ -3,6 +3,7 @@
  * (approval, input, error), derived from the server's own thread shells with the web client's rules. Read-only
  * information; `T3CODE_FP_WAITING_FILE=0` switches it off.
  */
+// @effect-diagnostics nodeBuiltinImport:off - plain synchronous Node file code outside the Effect runtime (Flightplan module).
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
@@ -185,14 +186,17 @@ export const startWaitingFile = (input: {
       const snapshot =
         threadIds.length === 0
           ? { threads: [] }
-          : yield* input.source.getShellSnapshot({
+          : // @effect-diagnostics-next-line anyUnknownInErrorContext:off - WaitingFileSource mirrors the orchestrator's untyped error channel; refresh() catches every cause
+            yield* input.source.getShellSnapshot({
               location: "active",
               threadIds: threadIds as ThreadId[],
             });
       const waiting = collectWaitingThreads(ticketThreads, snapshot.threads);
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - change-detection key of a plain object; never decoded
       const key = JSON.stringify(waiting);
       const nowMs = yield* Clock.currentTimeMillis;
       if (key === lastKey && nowMs - lastWriteMs < heartbeat) return;
+      // @effect-diagnostics-next-line globalDateInEffect:off - Date built from Clock.currentTimeMillis, renderWaitingFile takes a Date
       writeWaitingFile(file, renderWaitingFile(waiting, new Date(nowMs)));
       lastKey = key;
       lastWriteMs = nowMs;
@@ -220,6 +224,7 @@ export const startWaitingFile = (input: {
       );
       yield* forkParked(
         Effect.suspend(() =>
+          // @effect-diagnostics-next-line anyUnknownInErrorContext:off - WaitingFileSource mirrors the orchestrator's untyped error channel; caught by catchCause below
           Stream.runForEach(input.source.streamDomainEvents, () => Queue.offer(signals, undefined)),
         ).pipe(
           Effect.catchCause((cause) =>
