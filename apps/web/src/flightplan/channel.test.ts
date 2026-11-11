@@ -497,6 +497,26 @@ describe("denials in fp:activity", () => {
     });
   });
 
+  it("keeps the last good denials on an endpoint error; a good empty answer removes them", async () => {
+    captureFrameLayout(true, "?layout=full");
+    const sent: Record<string, unknown>[] = [];
+    const target = { postMessage: (m: unknown) => void sent.push(m as Record<string, unknown>) };
+    await reportActivity(shells, true, target, lookup, async () => ({ "5001": good }));
+    await reportActivity(shells, true, target, lookup, async () => {
+      throw new Error("offline");
+    });
+    await reportActivity(shells, true, target, lookup, async () => null);
+    await reportActivity(shells, true, target, lookup, async () => "kaputt");
+    expect(sent.map((m) => m.denials)).toEqual([
+      { "5001": good },
+      { "5001": good },
+      { "5001": good },
+      { "5001": good },
+    ]);
+    await reportActivity(shells, true, target, lookup, async () => ({}));
+    expect("denials" in sent[4]!).toBe(false);
+  });
+
   it("omits the field without denials, on a bad answer and on a failing endpoint", async () => {
     captureFrameLayout(true, "?layout=full");
     const sent: Record<string, unknown>[] = [];

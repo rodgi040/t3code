@@ -709,6 +709,21 @@ describe("denylist: denial log", () => {
     expect(NodeFS.statSync(logFile).mode & 0o777).toBe(0o600);
   });
 
+  it("cuts the log to its newer half above the limit and keeps whole lines", async () => {
+    NodeFS.rmSync(logFile, { force: true });
+    const run = hookFor({ ticketThreadsFile: mapping, threadIds: [uuid], maxBytes: 2000 });
+    for (let n = 0; n < 40; n += 1) await run("Bash", { command: "sudo ls" });
+    const rows = lines();
+    expect(rows.length).toBeGreaterThan(2);
+    expect(rows.length).toBeLessThan(40);
+    expect(NodeFS.statSync(logFile).size).toBeLessThanOrEqual(2000 + 300);
+    expect(NodeFS.statSync(logFile).mode & 0o777).toBe(0o600);
+    expect(NodeFS.readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+    const last = hookFor({ ticketThreadsFile: mapping, threadIds: [uuid] });
+    await last("Bash", { command: "docker rm x" });
+    expect(lines().at(-1)?.category).toBe("docker");
+  });
+
   it("a write error does not change the verdict", async () => {
     const blockedDir = NodePath.join(dir, "gibt-es-als-datei");
     NodeFS.writeFileSync(blockedDir, "x");
@@ -726,5 +741,74 @@ describe("denylist: denial log", () => {
     await hookFor()("Bash", { command: "sudo ls" });
     await hookFor({ ticketThreadsFile: mapping, threadIds: [uuid] })("Bash", { command: "ls" });
     expect(lines()).toHaveLength(before);
+  });
+});
+
+// Flightplan OP#1890 (B1): a force push that points at main/master still hits a protection target.
+describe("denylist: force push and protection flag", () => {
+  const verdict = async (command: string, branch: string | null = null) => {
+    const hook = makeDenylistPreToolUseHook(CWD, async () => branch);
+    const out = await hook(
+      {
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command },
+        tool_use_id: "t",
+        cwd: CWD,
+      } as never,
+      "t",
+      { signal: new AbortController().signal },
+    );
+    return Object.keys(out).length === 0 ? "free" : "deny";
+  };
+  const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "fp-denials-b1-"));
+  const mapping = NodePath.join(dir, "flightplan-ticket-threads.json");
+  const uuid = "33333333-3333-4333-8333-333333333333";
+  NodeFS.writeFileSync(
+    mapping,
+    JSON.stringify({ "1890": { threadId: uuid, environmentId: "e", projectId: "p" } }),
+  );
+  const logged = async (command: string, branch: string | null = null) => {
+    const file = denialLogFile(mapping);
+    NodeFS.rmSync(file, { force: true });
+    const hook = makeDenylistPreToolUseHook(CWD, async () => branch, {
+      ticketThreadsFile: mapping,
+      threadIds: [uuid],
+    });
+    await hook(
+      {
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command },
+        tool_use_id: "t",
+        cwd: CWD,
+      } as never,
+      "t",
+      { signal: new AbortController().signal },
+    );
+    const row = JSON.parse(NodeFS.readFileSync(file, "utf8").trim()) as Record<string, unknown>;
+    return [row.category, row.protected];
+  };
+
+  it.each([
+    ["git push -f origin main", null, ["git-push-force", true]],
+    ["git push --force origin HEAD:master", null, ["git-push-force", true]],
+    ["git push origin +main", null, ["git-push-force", true]],
+    ["git push --force-with-lease", "main", ["git-push-force", true]],
+    ["git push -f", "master", ["git-push-force", true]],
+    ["git push --force origin feature/x", null, ["git-push-force", false]],
+    ["git push -f", "feature/x", ["git-push-force", false]],
+    ["git push -f", null, ["git-push-force", false]],
+    ["git push origin +feature/x", "main", ["git-push-force", false]],
+    ["git push origin main", null, ["git-push-main", true]],
+    ["git push", "main", ["git-push-main", true]],
+  ] as const)("%s (branch %s) logs %j", async (command, branch, expected) => {
+    expect(await logged(command, branch)).toEqual(expected);
+    expect(await verdict(command, branch)).toBe("deny");
+  });
+
+  it("does not change what is allowed", async () => {
+    expect(await verdict("git push origin feature/x", "main")).toBe("free");
+    expect(await verdict("git push", "feature/x")).toBe("free");
   });
 });

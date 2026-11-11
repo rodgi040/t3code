@@ -81,11 +81,38 @@ export function summarizeDenials(text: string): DenialSummary {
   return result;
 }
 
-/** A missing or unreadable file is a normal state: no denials. */
-export function readDenialSummary(file: string): DenialSummary {
+const CACHE_MS = 10_000;
+const cache = new Map<
+  string,
+  { mtimeMs: number; size: number; at: number; summary: DenialSummary }
+>();
+
+/** Test hook: forgets the cached summaries. */
+export function resetDenialCache(): void {
+  cache.clear();
+}
+
+/**
+ * A missing or unreadable file is a normal state: no denials. The summary is kept for 10 s while size and mtime
+ * stay the same, because the dashboard asks on every report.
+ */
+export function readDenialSummary(file: string, now: number = Date.now()): DenialSummary {
   try {
-    return summarizeDenials(NodeFS.readFileSync(file, "utf8"));
+    const stat = NodeFS.statSync(file);
+    const hit = cache.get(file);
+    if (
+      hit !== undefined &&
+      hit.mtimeMs === stat.mtimeMs &&
+      hit.size === stat.size &&
+      now - hit.at < CACHE_MS
+    ) {
+      return hit.summary;
+    }
+    const summary = summarizeDenials(NodeFS.readFileSync(file, "utf8"));
+    cache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, at: now, summary });
+    return summary;
   } catch {
+    cache.delete(file);
     return {};
   }
 }

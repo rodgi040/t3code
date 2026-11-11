@@ -4,7 +4,7 @@ import * as NodePath from "node:path";
 
 import { describe, expect, it } from "vite-plus/test";
 
-import { denialsFile, readDenialSummary, summarizeDenials } from "./denials.ts";
+import { denialsFile, readDenialSummary, resetDenialCache, summarizeDenials } from "./denials.ts";
 
 // Flightplan OP#1890
 const row = (ticket: string | null, threadId: string, category: string, isProtected = false) =>
@@ -44,5 +44,32 @@ describe("denial summary per ticket", () => {
     expect(readDenialSummary(denialsFile(dir))).toEqual({
       "9": { count: 1, protected: false, maxInThread: 1, lastCategory: "sudo" },
     });
+  });
+});
+
+describe("denial summary cache", () => {
+  it("keeps the summary for 10 s while size and mtime are the same, then reads again", () => {
+    resetDenialCache();
+    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "fp-denials-cache-"));
+    NodeFS.mkdirSync(NodePath.join(dir, "userdata"));
+    const file = denialsFile(dir);
+    NodeFS.writeFileSync(file, `${row("9", "a", "sudo")}\n`);
+    const first = readDenialSummary(file, 1_000);
+    expect(readDenialSummary(file, 5_000)).toBe(first);
+    expect(readDenialSummary(file, 11_500)).not.toBe(first);
+    expect(readDenialSummary(file, 11_500)["9"]?.count).toBe(1);
+  });
+
+  it("reads again at once when the file changed", () => {
+    resetDenialCache();
+    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "fp-denials-cache-"));
+    NodeFS.mkdirSync(NodePath.join(dir, "userdata"));
+    const file = denialsFile(dir);
+    NodeFS.writeFileSync(file, `${row("9", "a", "sudo")}\n`);
+    expect(readDenialSummary(file, 1_000)["9"]?.count).toBe(1);
+    NodeFS.appendFileSync(file, `${row("9", "a", "docker", true)}\n`);
+    expect(readDenialSummary(file, 2_000)["9"]?.count).toBe(2);
+    NodeFS.rmSync(file);
+    expect(readDenialSummary(file, 3_000)).toEqual({});
   });
 });

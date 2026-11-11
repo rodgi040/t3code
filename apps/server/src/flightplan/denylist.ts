@@ -568,6 +568,7 @@ function checkGitPush(args: string[], ctx: DenylistContext): Denial | null {
   if (args[i] !== "push") return null;
   const positional: string[] = [];
   let tags = false;
+  let forced = false;
   for (let j = i + 1; j < args.length; j += 1) {
     const a = args[j]!;
     if (a === "--") {
@@ -581,10 +582,10 @@ function checkGitPush(args: string[], ctx: DenylistContext): Denial | null {
       a === "--force-if-includes" ||
       a.startsWith("--force-with-lease")
     ) {
-      return PUSH_FORCE_REASON;
+      forced = true;
     }
     if (!a.startsWith("--") && FORCE_PUSH_FLAG.test(a)) {
-      return PUSH_FORCE_REASON;
+      forced = true;
     }
     if (a === "--tags") tags = true;
     if (
@@ -600,20 +601,23 @@ function checkGitPush(args: string[], ctx: DenylistContext): Denial | null {
     if (a.startsWith("-")) continue;
     positional.push(a);
   }
-  for (const spec of positional.slice(1)) {
-    if (spec.startsWith("+"))
-      return denial("git-push-force", "git push mit +Refspec erzwingt den Push");
-  }
-  for (const spec of positional) {
-    if (protectedBranch(spec)) return PUSH_MAIN_REASON;
-  }
+  // OP#1890: the decision is the same as before (force, +ref and main/master all deny); only the flag changes:
+  // a force push that points at main/master (or, bare, runs on it) still counts as a protection target.
+  const plusRef = positional.slice(1).some((spec) => spec.startsWith("+"));
   const needsBranch =
     (positional.length <= 1 && !tags) || positional.slice(1).some((s) => s === "HEAD" || s === "@");
+  const mainTarget = positional.some(protectedBranch);
+  let mainBranch = false;
   if (needsBranch && dirKnown && dir !== null) {
     ctx.pushDirs?.add(dir);
     const branch = ctx.branchOf?.(dir);
-    if (branch === "main" || branch === "master") return PUSH_MAIN_REASON;
+    mainBranch = branch === "main" || branch === "master";
   }
+  if (forced || plusRef) {
+    const text = forced ? PUSH_FORCE_REASON.reason : "git push mit +Refspec erzwingt den Push";
+    return denial("git-push-force", text, mainTarget || mainBranch);
+  }
+  if (mainTarget || mainBranch) return PUSH_MAIN_REASON;
   return null;
 }
 
@@ -1305,8 +1309,11 @@ async function checkToolCallWithBranchesDenial(
 ): Promise<Denial | null> {
   const pushDirs = new Set<string>();
   const first = checkToolCallDenial(toolName, toolInput, { ...ctx, pushDirs });
-  if (first !== null || pushDirs.size === 0) return first;
+  if (pushDirs.size === 0) return first;
+  // A forced push is denied in any case; the second pass only settles whether it hit main/master.
+  if (first !== null && (first.protectedHit || first.category !== "git-push-force")) return first;
   if (pushDirs.size > MAX_PUSH_DIRS) {
+    if (first !== null) return first;
     return denial(
       "zu-lang",
       "zu viele git push in einem Befehl für die Sperrlisten-Prüfung; aufteilen",
@@ -1314,7 +1321,11 @@ async function checkToolCallWithBranchesDenial(
   }
   const branches = new Map<string, string | null>();
   await Promise.all([...pushDirs].map(async (dir) => branches.set(dir, await lookup(dir))));
-  return checkToolCallDenial(toolName, toolInput, { ...ctx, branchOf: (dir) => branches.get(dir) });
+  const second = checkToolCallDenial(toolName, toolInput, {
+    ...ctx,
+    branchOf: (dir) => branches.get(dir),
+  });
+  return second ?? first;
 }
 
 export async function checkToolCallWithBranches(
@@ -1333,6 +1344,25 @@ export async function checkToolCallWithBranches(
 export interface DenialLogTarget {
   readonly ticketThreadsFile: string;
   readonly threadIds: ReadonlyArray<string>;
+  /** Test hook: the size above which the log is cut to its newer half. Default 2 MB. */
+  readonly maxBytes?: number;
+}
+
+const DENIALS_MAX_BYTES = 2 * 1024 * 1024;
+
+/** Cuts the log to its newer half at a line border: temp file in the same folder (0600), then rename. */
+function trimDenialLog(file: string, maxBytes: number): void {
+  try {
+    if (NodeFS.statSync(file).size <= maxBytes) return;
+    const data = NodeFS.readFileSync(file);
+    const from = data.indexOf(0x0a, Math.floor(data.length / 2));
+    if (from < 0) return;
+    const tmp = `${file}.${process.pid}.tmp`;
+    NodeFS.writeFileSync(tmp, data.subarray(from + 1), { mode: 0o600 });
+    NodeFS.renameSync(tmp, file);
+  } catch {
+    // Trimming is housekeeping; a failure leaves the log as it is and never touches the verdict.
+  }
 }
 
 export const DENIALS_FILE_NAME = "flightplan-denials.jsonl";
@@ -1379,6 +1409,7 @@ function appendDenial(
     const file = denialLogFile(target.ticketThreadsFile);
     NodeFS.mkdirSync(NodePath.dirname(file), { recursive: true, mode: 0o700 });
     NodeFS.appendFileSync(file, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    trimDenialLog(file, target.maxBytes ?? DENIALS_MAX_BYTES);
   } catch {
     // The log is a hint for the human; a failed write must not change the verdict.
   }

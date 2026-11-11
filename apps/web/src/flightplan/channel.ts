@@ -614,6 +614,7 @@ export function normalizeDenials(raw: unknown): Record<string, TicketDenials> {
   return out;
 }
 
+let lastDenials: Record<string, TicketDenials> = {};
 let lastActivityReport = "";
 let activityReportSeq = 0;
 
@@ -633,7 +634,12 @@ export async function reportActivity(
   const tickets = await workingTickets(state, shells, lookup);
   const states = await ticketActivityStates(state, shells, lookup);
   // OP#1890: additive field, left out when empty or unreadable so receivers that do not know it see the old message.
-  const denials = normalizeDenials(await denialsLookup().catch(() => null));
+  // A failed or unreadable answer keeps the last good state (pills must not flicker); only a good answer replaces it.
+  const rawDenials = await denialsLookup().catch(() => null);
+  if (rawDenials !== null && typeof rawDenials === "object" && !Array.isArray(rawDenials)) {
+    lastDenials = normalizeDenials(rawDenials);
+  }
+  const denials = lastDenials;
   if (seq !== activityReportSeq) return;
   const message = {
     type: "fp:activity",

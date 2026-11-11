@@ -206,7 +206,10 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     `Denial` in `denylist.ts`): `git-push-main`, `git-push-force`, `sudo`, `systemctl`, `docker`, `rm-ausserhalb`,
     `schreibziel-geschuetzt`, `fp-op-doctor`, `zu-lang`, `pruefung-fehlgeschlagen`. `protected` is true for a protection target:
     `main`/`master` push, Docker, token or credential paths (`.ssh`, `.config`, `.hermes`, `.claude`) and the Claude settings files.
-    No command text and no path from the command is stored; a write error is swallowed. The hook gets the thread ids and the mapping
+    No command text and no path from the command is stored; a write error is swallowed. Above 2 MB the log is cut to its newer half
+    (temp file + rename; a failure there is swallowed too). The server keeps the per-ticket summary for 10 s (key: mtime and size).
+    A force push that points at `main`/`master` keeps category `git-push-force` but has `protected: true`. The web client keeps the
+    last good `denials` when the endpoint fails; only a good answer without entries removes the field. The hook gets the thread ids and the mapping
     file from `makeClaudeQueryOptions` (`ticketDenialLog`, set in `openQuery`; the ticket is looked up in the mapping at write time).
     `GET /api/flightplan/denials` (read scope, same origin rules as the ticket endpoint, `denialsHttp.ts`) returns
     `{ "<ticket>": { count, protected, maxInThread, lastCategory } }`. `fp:activity` carries the same object as the optional field
