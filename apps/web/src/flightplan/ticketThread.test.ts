@@ -6,6 +6,7 @@ import {
   sendTicketStart,
   ticketAwaitsStart,
   ticketStartPrompt,
+  ticketWorkPrompt,
   type TicketThreadCommands,
 } from "./ticketThread";
 
@@ -61,7 +62,16 @@ describe("ticket thread creation (OP#1840, OP#1841)", () => {
     expect(cmd.startTurn).toHaveBeenCalledOnce();
     const input = cmd.startTurn.mock.calls[0]?.[0].input;
     expect(input.runtimeMode).toBe("auto");
-    expect(input.message.text).toBe(ticketStartPrompt("1840"));
+    expect(input.message.text).toBe(ticketWorkPrompt("1840"));
+    expect(input.message.text).not.toBe(ticketStartPrompt("1840"));
+  });
+
+  it("the work text opens with the sentence the server reads the ticket number from", () => {
+    const first = (text: string) => text.split("\n")[0];
+    expect(first(ticketWorkPrompt("77"))).toBe(first(ticketStartPrompt("77")));
+    expect(ticketWorkPrompt("77")).toContain("bearbeite es jetzt");
+    expect(ticketStartPrompt("77")).toContain("Ändere dabei noch nichts");
+    expect(ticketWorkPrompt("77")).not.toContain("Ändere dabei noch nichts");
   });
 });
 

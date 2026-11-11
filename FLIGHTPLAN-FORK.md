@@ -113,6 +113,11 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
       `running` when the ticket's thread has a turn or waits for the human (or a start for it is under 15 s old),
       `slots` when `TICKET_SLOT_LIMIT` (4) other tickets are `working` (state logic of fp:activity v2), `error` on a
       failure, a missing host or a deleted thread. The first open of item 16 starts nothing.
+    - The start turn of `fp:start` (new and resting thread) is `ticketWorkPrompt`: same first sentence as
+      `ticketStartPrompt` (the server reads the ticket number for the assumption rule from it), then "Maintainer released the
+      background start; read ticket and comments, take it over, work it now to the result (own branch and worktree,
+      tests, PR), record decisions inside the approved plan as assumptions, ask about reserved topics, finish with the
+      closing statement". The button "Zusammenfassung holen" keeps `ticketStartPrompt` (summary only, changes nothing).
     - `{type:"fp:answered", questionId, ok:true, ticket, answer}`: besides the display, sends the turn
       `Antwort auf die Rückfrage: <answer>` into the ticket's thread, also when it is not the open one. Once per
       `questionId` and browser (`sessionStorage` key `fp:answered-forwarded`). Without `ticket`/`answer` or with

@@ -19,7 +19,7 @@ import {
 } from "./channel";
 import { flightplanFrameFull } from "./embed";
 import { refreshRequestWatches, setTicketRequestsHost, type TicketRequestsHost } from "./requests";
-import { createTicketThread, ticketStartPrompt } from "./ticketThread";
+import { createTicketThread, ticketWorkPrompt } from "./ticketThread";
 
 const REPEAT_MS = 30_000;
 
@@ -107,7 +107,7 @@ export function FlightplanActivity() {
       ready: () => latest.current.shellsReady,
       shells: () => latest.current.shells,
       sendTurn,
-      startExisting: (threadId, ticket) => sendTurn(threadId, ticketStartPrompt(String(ticket))),
+      startExisting: (threadId, ticket) => sendTurn(threadId, ticketWorkPrompt(String(ticket))),
       startNew: async (ticket) => {
         const {
           projects: all,

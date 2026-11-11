@@ -48,6 +48,20 @@ export function ticketStartPrompt(ticketId: string): string {
 }
 
 /**
+ * fp:start ("Im Hintergrund starten"): the agent works the ticket. The first sentence stays identical to
+ * ticketStartPrompt, because the server (prompt.ts START_TICKET) reads the ticket number for the assumption rule from it.
+ */
+export function ticketWorkPrompt(ticketId: string): string {
+  return [
+    `Ticket #${ticketId} wurde im ADA-Dashboard geöffnet.`,
+    "Der Maintainer hat den Start im Hintergrund freigegeben.",
+    "Lies Ticket und Kommentare, übernimm das Ticket und bearbeite es jetzt nach den Regeln des Projekts bis zum Ergebnis: eigener Branch und Worktree, Tests, PR.",
+    "Entscheidungen im freigegebenen Plan hältst du als Annahme fest; bei allem Vorbehaltenen stellst du eine Rückfrage.",
+    "Schließe mit der Abschlussaussage ab.",
+  ].join("\n");
+}
+
+/**
  * Flightplan OP#1841: new ticket threads run in T3 "Auto", which the Claude driver maps to the Claude Code `auto`
  * permission mode (classifier; ClaudeAdapterV2 `permissionModeForClaudeRuntimePolicy`). Existing threads keep theirs.
  */
@@ -114,7 +128,7 @@ export async function readTicketThread(ticketId: string): Promise<TicketThreadRe
 
 /**
  * Flightplan OP#1802/OP#1840: creates a thread for a ticket, secures the ticket-to-thread record on the server and,
- * when `startAgent` is set and this call really created the record, sends the start turn. Does not navigate.
+ * when `startAgent` is set and this call really created the record, sends the work turn (ticketWorkPrompt). Does not navigate.
  */
 export async function createTicketThread(input: {
   readonly ticketId: string;
@@ -177,7 +191,7 @@ export async function createTicketThread(input: {
         message: {
           messageId: newMessageId(),
           role: "user",
-          text: ticketStartPrompt(ticketId),
+          text: ticketWorkPrompt(ticketId),
           attachments: [],
         },
         modelSelection,

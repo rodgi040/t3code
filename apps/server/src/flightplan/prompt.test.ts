@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { enrichFlightplanPrompt, isSlashCommand, takeTraceMarker, ticketIds } from "./prompt.ts";
+import {
+  enrichFlightplanPrompt,
+  isSlashCommand,
+  takeTraceMarker,
+  startTurnTicket,
+  ticketIds,
+} from "./prompt.ts";
 
 describe("flightplan prompt", () => {
   it("collects ticket ids once", () => {
@@ -127,6 +133,20 @@ describe("flightplan prompt", () => {
       await withSwitch("1", async () => {
         const out = await run("Ticket #77 wurde im ADA-Dashboard geöffnet.\nFasse zusammen.");
         expect(out).toContain("fp-op assume 77 --text");
+      });
+    });
+
+    it("recognises the ticket in the fp:start work text (OP#1840)", async () => {
+      const work = [
+        "Ticket #1840 wurde im ADA-Dashboard geöffnet.",
+        "Der Maintainer hat den Start im Hintergrund freigegeben.",
+        "Lies Ticket und Kommentare, übernimm das Ticket und bearbeite es jetzt.",
+      ].join("\n");
+      expect(startTurnTicket(work)).toBe("1840");
+      await withSwitch("1", async () => {
+        const out = await run(work);
+        expect(out).toContain("fp-op assume 1840 --text");
+        expect(out).toContain("fp-op ask 1840 --question");
       });
     });
 
