@@ -43,7 +43,7 @@ import type { HookCallback } from "@anthropic-ai/claude-agent-sdk";
 
 import { readTicketThreadMap } from "./ticketThreads.ts";
 
-export const DENYLIST_ENV = "T3CODE_FP_DENYLIST";
+const DENYLIST_ENV = "T3CODE_FP_DENYLIST";
 
 /** On by default for ticket threads. `0` (or `false`) switches it off. */
 export function denylistEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -1137,7 +1137,7 @@ function under(path: string, root: string): boolean {
   return path === root || path.startsWith(`${root}/`);
 }
 
-export function checkWritePath(rawPath: string, ctx: DenylistContext): string | null {
+function checkWritePath(rawPath: string, ctx: DenylistContext): string | null {
   const home = NodePath.posix.normalize(ctx.home ?? NodeOS.homedir());
   const resolved = resolveTarget(rawPath, ctx, home);
   const path = resolved === null || resolved === "" ? NodePath.posix.normalize(rawPath) : resolved;
