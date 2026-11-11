@@ -53,12 +53,12 @@ export function startTurnTicket(text: string): string | undefined {
   return (BLOCK_TICKET.exec(text) ?? START_TICKET.exec(text))?.[1];
 }
 
-export function assumptionRuleEnabled(): boolean {
+function assumptionRuleEnabled(): boolean {
   return process.env.T3CODE_FP_ASSUMPTION_RULE === "1";
 }
 
 // Flightplan OP#1838: decide inside the approved plan, record the assumption on the ticket, ask about reserved topics.
-export function assumptionRule(ticket: string): string {
+function assumptionRule(ticket: string): string {
   return [
     "Regeln für Entscheidungen in diesem Ticket:",
     "- Entscheidungen innerhalb des freigegebenen Plans und Scopes des Tickets triffst du selbst. Frag dafür nicht nach.",
