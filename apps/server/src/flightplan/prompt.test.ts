@@ -21,6 +21,20 @@ const UUID = "11111111-1111-4111-8111-111111111111";
 const UUID_HEX = "11111111111141118111111111111111";
 
 describe("flightplan prompt", () => {
+  // Flightplan: the server test setup points the sender at a missing file, so no test reaches Langfuse by default.
+  it("does not send from the test environment unless a test opts in", async () => {
+    const path = process.env.FP_LANGFUSE_ENV;
+    expect(path).toBeTruthy();
+    expect(NodeFS.existsSync(path ?? "")).toBe(false);
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      expect(await sendTurnSpan(UUID, "thread-1", "1837")).toBeNull();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it("collects ticket ids once", () => {
     expect(ticketIds("siehe #12 und nochmal #12 sowie #7")).toEqual(["12", "7"]);
   });
