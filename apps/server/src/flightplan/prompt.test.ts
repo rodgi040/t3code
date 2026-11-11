@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { enrichFlightplanPrompt, isSlashCommand, takeTraceMarker, ticketIds } from "./prompt.ts";
+import {
+  enrichFlightplanPrompt,
+  isSlashCommand,
+  takeTraceMarker,
+  startTurnTicket,
+  ticketIds,
+} from "./prompt.ts";
 
 describe("flightplan prompt", () => {
   it("collects ticket ids once", () => {
@@ -85,7 +91,9 @@ describe("flightplan prompt", () => {
 
     it("leaves the prompt unchanged when the switch is off", async () => {
       await withSwitch(undefined, async () => {
-        expect(await run(block(1838) + "Los")).not.toContain("fp-op assume");
+        const off = await run(block(1838) + "Los");
+        expect(off).not.toContain("fp-op assume");
+        expect(off).not.toContain("fp-op ask");
       });
       await withSwitch("0", async () => {
         expect(await run(block(1838) + "Los")).not.toContain("fp-op assume");
@@ -97,6 +105,11 @@ describe("flightplan prompt", () => {
         const first = await run(block(1838) + "Los");
         expect(first).toContain("fp-op assume 1838 --text");
         expect(first).toContain("fp-op result 1838 --stdin");
+        // OP#1842
+        expect(first).toContain("fp-op ask 1838 --question");
+        expect(first).toContain("--recommend");
+        expect(first).toContain("--kind entscheidung|freigabe|zugang|abnahme");
+        expect(first).toContain("--reversible oder --irreversible");
         expect(first).toContain("Es darf nur eine Annahme offen sein");
         expect(first).toContain("merge nicht");
         for (const topic of [
@@ -120,6 +133,20 @@ describe("flightplan prompt", () => {
       await withSwitch("1", async () => {
         const out = await run("Ticket #77 wurde im ADA-Dashboard geöffnet.\nFasse zusammen.");
         expect(out).toContain("fp-op assume 77 --text");
+      });
+    });
+
+    it("recognises the ticket in the fp:start work text (OP#1840)", async () => {
+      const work = [
+        "Ticket #1840 wurde im ADA-Dashboard geöffnet.",
+        "Der Maintainer hat den Start im Hintergrund freigegeben.",
+        "Lies Ticket und Kommentare, übernimm das Ticket und bearbeite es jetzt.",
+      ].join("\n");
+      expect(startTurnTicket(work)).toBe("1840");
+      await withSwitch("1", async () => {
+        const out = await run(work);
+        expect(out).toContain("fp-op assume 1840 --text");
+        expect(out).toContain("fp-op ask 1840 --question");
       });
     });
 

@@ -65,6 +65,7 @@ export function assumptionRule(ticket: string): string {
     `- Halte jede solche Entscheidung, die der Mensch anders sehen könnte, als Annahme fest: fp-op assume ${ticket} --text "…". Es darf nur eine Annahme offen sein; ist schon eine offen (Exit 2), stell eine Rückfrage statt einer zweiten Annahme.`,
     "- Solange eine Annahme offen ist: arbeite nur in deinem Branch und merge nicht.",
     "- Immer Rückfrage an den Menschen, nie Annahme: Deploy, Release, Einspielen; Host, Docker, Firewall, SSH, Ports, DNS; Secrets und Rotation; Löschen und alles Unumkehrbare; Geld, Budget, Modellwahl; Kunden, Versand, Verträge; Scope und Priorität; Architektur und Zuständigkeit; Prüfer-Befunde; Überspringen eines Gates.",
+    `- Rückfragen stellst du so: fp-op ask ${ticket} --question "…" --option "…" (mehrfach) --recommend "<Option>" --kind entscheidung|freigabe|zugang|abnahme und --reversible oder --irreversible.`,
     `- Am Ende der Arbeit: fp-op result ${ticket} --stdin mit den Abschnitten Geändert, Geprüft, Offen.`,
   ].join("\n");
 }
