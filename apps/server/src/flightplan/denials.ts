@@ -97,7 +97,7 @@ export function resetDenialCache(): void {
  * A missing or unreadable file is a normal state: no denials. The summary is kept for 10 s while size and mtime
  * stay the same, because the dashboard asks on every report.
  */
-// @effect-diagnostics-next-line globalDate:off - default argument of a plain synchronous reader; tests pass `now` explicitly
+// @effect-diagnostics-next-line globalDate:off - default argument of a plain synchronous reader; callers may pass `now`
 export function readDenialSummary(file: string, now: number = Date.now()): DenialSummary {
   try {
     const stat = NodeFS.statSync(file);

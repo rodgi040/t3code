@@ -3,7 +3,7 @@
  * (approval, input, error), derived from the server's own thread shells with the web client's rules. Read-only
  * information; `T3CODE_FP_WAITING_FILE=0` switches it off.
  */
-// @effect-diagnostics nodeBuiltinImport:off - plain synchronous Node file code outside the Effect runtime (Flightplan module).
+// @effect-diagnostics nodeBuiltinImport:off - the file is written with plain synchronous node:fs calls (small local state file).
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
@@ -16,6 +16,7 @@ import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 
+import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
 import { forkParked } from "../serverActivation.ts";
 import { readTicketThreadMap, ticketThreadFile } from "./ticketThreads.ts";
 
@@ -156,8 +157,11 @@ export interface WaitingFileSource {
   readonly getShellSnapshot: (options: {
     readonly location: "active";
     readonly threadIds: ReadonlyArray<ThreadId>;
-  }) => Effect.Effect<{ readonly threads: ReadonlyArray<OrchestrationV2ThreadShell> }, unknown>;
-  readonly streamDomainEvents: Stream.Stream<unknown, unknown>;
+  }) => Effect.Effect<
+    { readonly threads: ReadonlyArray<OrchestrationV2ThreadShell> },
+    OrchestratorV2Error
+  >;
+  readonly streamDomainEvents: Stream.Stream<unknown, OrchestratorV2Error>;
 }
 
 /**
@@ -186,8 +190,7 @@ export const startWaitingFile = (input: {
       const snapshot =
         threadIds.length === 0
           ? { threads: [] }
-          : // @effect-diagnostics-next-line anyUnknownInErrorContext:off - WaitingFileSource mirrors the orchestrator's untyped error channel; refresh() catches every cause
-            yield* input.source.getShellSnapshot({
+          : yield* input.source.getShellSnapshot({
               location: "active",
               threadIds: threadIds as ThreadId[],
             });
@@ -224,7 +227,6 @@ export const startWaitingFile = (input: {
       );
       yield* forkParked(
         Effect.suspend(() =>
-          // @effect-diagnostics-next-line anyUnknownInErrorContext:off - WaitingFileSource mirrors the orchestrator's untyped error channel; caught by catchCause below
           Stream.runForEach(input.source.streamDomainEvents, () => Queue.offer(signals, undefined)),
         ).pipe(
           Effect.catchCause((cause) =>
