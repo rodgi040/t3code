@@ -14,7 +14,8 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
 4. Parent channel: the web client accepts `fp:context` and `fp:questions` only from
    `http://localhost:8090` and answers with `fp:answer` to that origin (`apps/web/src/flightplan/`).
    `#123` in a prompt is expanded server-side with `fp-op get` as user `claude`. Claude Code turns
-   open one Langfuse trace from the host sender file; the id is not a secret, the keys stay in that file.
+   send one OTLP span (OP#1853, see 14) to Langfuse with the keys from the host sender file; the id is not a secret,
+   the keys stay in that file.
 5. AgentScope: `seedFlightplanAgentscopeInstance` is a second local ACP instance. Its environment
    `FP_A2A_AGENTS=agentscope` is passed through the ACP driver's instance environment. Fake model
    mode stays on the agent container.
@@ -69,10 +70,14 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
 14. Session context once (OP#1803): `enrichFlightplanPrompt` in `apps/server/src/flightplan/prompt.ts` adds the fp-op hint
     and the `Trace:` line only to the first turn of a thread (`firstTurn` from `ProviderTurnStartService`). Slash
     commands (`/goal clear`, `/compact`, ...) reach the provider verbatim on every turn, and a `[[fp-trace:...]]` marker
-    is always stripped; `parseGoalCommand` ignores a marker from an older web build. The Langfuse trace is still created
-    per turn and carries the thread id as `sessionId`. Unchanged by design: a message that names `#<id>` gets that
+    is always stripped; `parseGoalCommand` ignores a marker from an older web build. Langfuse (OP#1853): one OTLP span
+    `t3-fp-claude` per Claude turn except slash commands, `POST /api/public/otel/v1/traces`, environment and
+    `service.name` `t3-fp`, session = thread id, tag `ticket:<n>` and metadata `fp_issue` for ticket threads (ticket from
+    the mapping file; without an entry only on turns that start with the ticket context block or the dashboard start
+    sentence). The `Trace:` line carries the 32-hex trace id of the span. The span holds identifiers only, no prompt or
+    answer text. Timeout 5 s and fail-open; the keys stay in the host sender file. Unchanged by design: a message that names `#<id>` gets that
     ticket's `fp-op get` output appended (up to 8 KB) on every turn.
-14a. Assumption rule in the start prompt (OP#1838): with the same first-turn context, `assumptionRule(ticket)` adds a German
+    14a. Assumption rule in the start prompt (OP#1838): with the same first-turn context, `assumptionRule(ticket)` adds a German
     block: decide inside the approved plan and scope yourself, record a decision the human might see differently with
     `fp-op assume <ticket> --text "..."` (one open assumption at most, Exit 2 means ask instead), work only in the own
     branch and do not merge while one is open, always ask about the reserved topics (deploy, host, secrets, deleting,
