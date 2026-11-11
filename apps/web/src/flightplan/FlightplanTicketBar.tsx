@@ -1,8 +1,12 @@
 import { ChevronDownIcon, ExternalLinkIcon } from "lucide-react";
-import { useState, useSyncExternalStore } from "react";
+import { useRef, useState, useSyncExternalStore } from "react";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
+import { runtimeModeConfig } from "~/components/chat/runtimeModeConfig";
+import { useThreadShells } from "~/state/entities";
+import { threadEnvironment } from "~/state/threads";
+import { useOrchestrationCommand } from "~/state/use-orchestration-command";
 
 import {
   PARENT_ORIGIN,
@@ -14,6 +18,7 @@ import {
   type FlightplanWorkPackage,
 } from "./channel";
 import { flightplanFrameFull } from "./embed";
+import { sendTicketStart, ticketAwaitsStart } from "./ticketThread";
 import { TicketComment } from "./FlightplanComposer";
 import {
   eventTime,
@@ -133,6 +138,46 @@ function Description({ text }: { readonly text: string }) {
   );
 }
 
+/** OP#1840: the first opening starts no turn; this button sends the start turn once, while the thread has none. */
+function SummaryButton({
+  ticketId,
+  shell,
+}: {
+  readonly ticketId: number;
+  readonly shell: ReturnType<typeof useThreadShells>[number];
+}) {
+  const startTurn = useOrchestrationCommand(threadEnvironment.startTurn, { reportFailure: false });
+  const busy = useRef(false);
+  const [sending, setSending] = useState(false);
+  const [failed, setFailed] = useState(false);
+  if (!ticketAwaitsStart(shell)) return null;
+  return (
+    <>
+      <Button
+        size="sm"
+        disabled={sending}
+        data-fp-ticket-start="true"
+        onClick={() => {
+          if (busy.current) return;
+          setSending(true);
+          setFailed(false);
+          void sendTicketStart({ ticketId: String(ticketId), shell, startTurn, busy })
+            .then((ok) => setFailed(!ok))
+            .catch(() => setFailed(true))
+            .finally(() => setSending(false));
+        }}
+      >
+        {sending ? "Wird gesendet …" : "Zusammenfassung holen"}
+      </Button>
+      {failed ? (
+        <span role="alert" className="text-destructive" data-fp-ticket-start-error="true">
+          Nicht gesendet.
+        </span>
+      ) : null}
+    </>
+  );
+}
+
 function TicketBarBody({
   ticket,
   threadId,
@@ -159,6 +204,8 @@ function TicketBarBody({
   const status = ticket.status_label || ticket.status;
   const labels = (ticket.labels ?? []).slice(0, LABELS_SHOWN);
   const detailsId = `fp-ticket-bar-${threadId}`;
+  const shells = useThreadShells();
+  const shell = shells.find((item) => item.id === threadId);
 
   const toggle = () => {
     const next = { open: !open, seen: openIds };
@@ -208,6 +255,8 @@ function TicketBarBody({
           <Meta key={label} value={label} />
         ))}
         {ticket.assignee ? <Meta value={`✳ ${ticket.assignee}`} /> : null}
+        {shell ? <Meta label="Modus" value={runtimeModeConfig[shell.runtimeMode].label} /> : null}
+        {shell ? <SummaryButton ticketId={ticket.id} shell={shell} /> : null}
         {link ? (
           <Button
             size="xs"

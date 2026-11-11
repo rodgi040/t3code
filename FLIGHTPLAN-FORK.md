@@ -80,10 +80,16 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     `failed`; `interrupted` gives no entry) or `working`; with several signals the rank is approval > input > error > working. The dashboard shows "Agent arbeitet" in
     the ticket picker from it; the signal is transient and writes nothing to OpenProject. Concept:
     Factory `Flightplan V1.0/_meta/planning/KONZEPT-OP1802-TICKET-ZUSTAND-20261110.md`.
-16. Start turn on the first open of a ticket (OP#1802): when the dashboard frame creates the thread for a ticket,
-    `_chat.embed.$ticketId.tsx` sends one start turn (state summary, open decisions, questions, change nothing).
-    Reopening the ticket, the compact workplace embed and a lost claim race send nothing. The ticket block goes out
-    while the thread has no user message yet (`useComposerSend.ts`).
+16. No start turn on the first open of a ticket (OP#1840, reverses OP#1802): `_chat.embed.$ticketId.tsx` still creates
+    and assigns the thread, but sends no turn (`startAgent: false`). A ticket thread without any turn
+    (`latestUserMessageAt` and `latestRun` empty, `ticketAwaitsStart`) shows the button "Zusammenfassung holen" in the
+    ticket bar; one click sends the former start turn (`ticketStartPrompt`, state summary, open decisions, questions,
+    change nothing) via `sendTicketStart`, the button is disabled while sending and disappears once the thread has a
+    turn. The compact workplace embed starts nothing, as before. `fp:start` (item 17) is the way to start an agent
+    without opening. The ticket block goes out while the thread has no user message yet (`useComposerSend.ts`).
+    Runtime mode (OP#1841): new ticket threads (embed route and `fp:start`) use `TICKET_RUNTIME_MODE = "auto"`,
+    which `ClaudeAdapterV2.permissionModeForClaudeRuntimePolicy` maps to the Claude Code `auto` permission mode.
+    Existing threads keep theirs. The ticket bar shows the thread's mode as "Modus".
 
 17. Background start and continuation (OP#1840, contract Phase 2a section 4). All messages come from
     `http://localhost:8090` only and are handled by `FlightplanActivity` (full layout), which registers the turn host of
@@ -96,7 +102,7 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
       is reused. Reply `{type:"fp:started", ticket, threadId|null, result:"accepted"|"rejected", reason:null|"slots"|"running"|"error"}`:
       `running` when the ticket's thread has a turn or waits for the human (or a start for it is under 15 s old),
       `slots` when `TICKET_SLOT_LIMIT` (4) other tickets are `working` (state logic of fp:activity v2), `error` on a
-      failure, a missing host or a deleted thread. The first-click start of item 16 is unchanged.
+      failure, a missing host or a deleted thread. The first open of item 16 starts nothing.
     - `{type:"fp:answered", questionId, ok:true, ticket, answer}`: besides the display, sends the turn
       `Antwort auf die Rückfrage: <answer>` into the ticket's thread, also when it is not the open one. Once per
       `questionId` and browser (`sessionStorage` key `fp:answered-forwarded`). Without `ticket`/`answer` or with

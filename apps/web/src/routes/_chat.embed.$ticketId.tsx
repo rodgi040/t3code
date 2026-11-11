@@ -72,8 +72,8 @@ function EmbedTicketRoute() {
           project,
           commands: { createThread, startTurn },
           replace,
-          // OP#1802: only the dashboard starts the agent, and only for the thread this click created.
-          startAgent: fullLayout,
+          // OP#1840: opening only creates and assigns the thread; the start turn comes from the button or fp:start.
+          startAgent: false,
         });
       }
       if (fullLayout) bindTicketThread(Number(ticketId), record.threadId);

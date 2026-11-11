@@ -5,7 +5,10 @@ import type { EnvironmentAuthorizationError } from "@t3tools/contracts";
 
 import { newMessageId, newThreadId } from "../lib/utils";
 import type { threadEnvironment } from "../state/threads";
-import type { EnvironmentProject } from "@t3tools/client-runtime/state/models";
+import type {
+  EnvironmentProject,
+  EnvironmentThreadShell,
+} from "@t3tools/client-runtime/state/models";
 
 export interface TicketThreadRecord {
   readonly threadId: string;
@@ -34,7 +37,7 @@ export class TicketThreadClaimLostError extends Error {
   }
 }
 
-/** Flightplan OP#1802: the first turn of a ticket's chat, sent when the dashboard opens or starts the ticket. */
+/** Flightplan OP#1802: the first turn of a ticket's chat, sent by fp:start or by the button "Zusammenfassung holen" (OP#1840: not on open). */
 export function ticketStartPrompt(ticketId: string): string {
   return [
     `Ticket #${ticketId} wurde im ADA-Dashboard geöffnet.`,
@@ -42,6 +45,54 @@ export function ticketStartPrompt(ticketId: string): string {
     "Nenne danach die offenen Entscheidungen (was, wo, wie) und stelle deine Fragen dazu direkt hier im Chat.",
     "Ändere dabei noch nichts, weder am Ticket noch am Code.",
   ].join("\n");
+}
+
+/**
+ * Flightplan OP#1841: new ticket threads run in T3 "Auto", which the Claude driver maps to the Claude Code `auto`
+ * permission mode (classifier; ClaudeAdapterV2 `permissionModeForClaudeRuntimePolicy`). Existing threads keep theirs.
+ */
+export const TICKET_RUNTIME_MODE = "auto" as const;
+
+/** OP#1840: a ticket thread without any turn offers "Zusammenfassung holen"; the first opening no longer starts one. */
+export function ticketAwaitsStart(
+  shell: Pick<EnvironmentThreadShell, "latestUserMessageAt" | "latestRun"> | null | undefined,
+): boolean {
+  return Boolean(shell) && shell?.latestUserMessageAt == null && shell?.latestRun == null;
+}
+
+/** Sends the start turn into an existing, still empty ticket thread; `busy` blocks a second send while one is under way. */
+export async function sendTicketStart(input: {
+  readonly ticketId: string;
+  readonly shell: Pick<
+    EnvironmentThreadShell,
+    "environmentId" | "id" | "modelSelection" | "runtimeMode" | "interactionMode"
+  >;
+  readonly startTurn: TicketThreadCommands["startTurn"];
+  readonly busy: { current: boolean };
+}): Promise<boolean> {
+  const { ticketId, shell, startTurn, busy } = input;
+  if (busy.current) return false;
+  busy.current = true;
+  try {
+    const result = await startTurn({
+      environmentId: shell.environmentId,
+      input: {
+        threadId: shell.id,
+        message: {
+          messageId: newMessageId(),
+          role: "user",
+          text: ticketStartPrompt(ticketId),
+          attachments: [],
+        },
+        modelSelection: shell.modelSelection,
+        runtimeMode: shell.runtimeMode,
+        interactionMode: shell.interactionMode,
+      },
+    });
+    return result._tag !== "Failure";
+  } finally {
+    busy.current = false;
+  }
 }
 
 export function claudeSelection(project: Pick<EnvironmentProject, "defaultModelSelection">) {
@@ -84,7 +135,7 @@ export async function createTicketThread(input: {
       projectId: project.id,
       title: `Ticket #${ticketId}`,
       modelSelection,
-      runtimeMode: "approval-required",
+      runtimeMode: TICKET_RUNTIME_MODE,
       interactionMode: "default",
       branch: null,
       worktreePath: null,
@@ -117,7 +168,7 @@ export async function createTicketThread(input: {
       .catch(() => undefined);
     throw new TicketThreadClaimLostError(record.threadId);
   }
-  // OP#1802: only the dashboard starts the agent, and only for the thread this call created.
+  // OP#1840: only fp:start passes startAgent, and only for the thread this call created.
   if (startAgent && record.created && record.threadId === threadId) {
     const started = await commands.startTurn({
       environmentId: project.environmentId,
@@ -130,7 +181,7 @@ export async function createTicketThread(input: {
           attachments: [],
         },
         modelSelection,
-        runtimeMode: "approval-required",
+        runtimeMode: TICKET_RUNTIME_MODE,
         interactionMode: "default",
       },
     });
