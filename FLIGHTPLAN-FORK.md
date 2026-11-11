@@ -146,20 +146,23 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
       Reply `{type:"fp:requests", ticket, threadId|null, items:[{requestId, kind:"question"|"approval", createdAt, answerable,
       question?:{text, options:[{label, description|null, recommended}], multiSelect}, approval?:{detail, reason|null, tool|null}}]}`.
       `threadId` is null (items empty) when no thread is assigned. `answerable:false`: several questions, multiSelect,
-      `not_resumable`, no custom answer and no options, or an approval without text, not live, or whose options lack
-      accept or decline. `recommended`: label ends with "(Recommended)" or "(Empfohlen)".
+      a question that is not `live`, no custom answer and no options, or an approval that is not a `command`, not `live`,
+      whose options lack accept or decline, or whose `detail` does not equal the input of a `command_execution` item of the
+      thread (only then is detail the whole command: Claude shows a title or a 400-character summary for tools other than
+      Bash, Codex shows `reason` before the command). `recommended`: label ends with "(Recommended)" or "(Empfohlen)".
     - Queried tickets are remembered (at most 50, in memory). On every activity beat (shell change, every 30 s with a
       fresh server lookup) `refreshRequestWatches` starts a subscription for a queried ticket whose thread waits (at most 12),
       sends `fp:requests` again when the items changed, and releases the subscription after sending empty items.
       If the detail does not arrive within 8 s, empty items are sent once; a later arrival sends the real ones.
     - `{type:"fp:respond", ticket, threadId, requestId, kind:"question", optionLabel | text}` or
-      `{..., kind:"approval", decision:"accept"|"decline"}`; reply `{type:"fp:responded", ticket, requestId, result:"ok"|"gone"|"error"}`.
+      `{..., kind:"approval", decision:"accept"|"decline", detail}` (`detail` = the command text the dashboard showed; it must equal the
+      open request's `detail`, else `gone` and nothing is released); reply `{type:"fp:responded", ticket, requestId, result:"ok"|"gone"|"error"}`.
       `threadId` must equal the server record of the ticket, the request must be pending in that thread. `optionLabel` must equal
       an option label exactly (the provider `value` is sent when the option has one); `text` is cleaned like item 17 and
       cut at 4000 characters, refused when the question disallows custom answers. Approvals use only the decisions
       `accept` and `decline` (single use), never `acceptForSession`, `acceptAlways` or a mode change. Each
       `requestId` is answered once (memory plus `sessionStorage` key `fp:responded`); a repeat gets `gone`; a failed send
-      is not consumed. The answer goes through `respondToApproval`/`respondToUserInput` with the explicit `threadId`;
+      is not consumed and answers `gone` when the live watch no longer lists the request. The answer goes through `respondToApproval`/`respondToUserInput` with the explicit `threadId`;
       the chat's own hook (`usePendingThreadRequests`) is unchanged.
 
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,

@@ -148,8 +148,18 @@ export function FlightplanActivity() {
             environmentId: shell.environmentId,
             threadId: shell.id,
           }),
-          (structure) =>
-            onChange(structure === null ? null : derivePendingThreadRequests(structure.projection)),
+          (structure) => {
+            if (structure === null) return onChange(null);
+            const pending = derivePendingThreadRequests(structure.projection);
+            // Inputs of the thread's commands: lets the channel check that an approval's text is the whole command.
+            const commands = new Set<string>();
+            if (pending.approvals.length > 0) {
+              for (const item of structure.projection.turnItems) {
+                if (item.type === "command_execution") commands.add(item.input.trim());
+              }
+            }
+            onChange({ ...pending, commands });
+          },
           { immediate: true },
         );
       },

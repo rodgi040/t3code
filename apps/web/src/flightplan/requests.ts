@@ -21,6 +21,12 @@ import {
 // Flightplan OP#1842: open questions and command approvals of a ticket's thread (fp:requests-get / fp:requests) and
 // answers from the dashboard (fp:respond / fp:responded). Contract: vertrag-phase3.md sections 1 and 2.
 
+/**
+ * The thread's pending requests plus the exact input of every command_execution item in the thread. A command approval
+ * is only answerable when its detail equals one of them: that proves detail is the whole command, not a title or a cut summary.
+ */
+export type PendingSnapshot = PendingThreadRequests & { readonly commands: ReadonlySet<string> };
+
 export type RequestKind = "question" | "approval";
 export type RespondResult = "ok" | "gone" | "error";
 
@@ -78,7 +84,7 @@ export interface TicketRequestsHost {
    */
   readonly watch: (
     threadId: string,
-    onChange: (pending: PendingThreadRequests | null) => void,
+    onChange: (pending: PendingSnapshot | null) => void,
   ) => (() => void) | null;
   /** respondToThreadApproval with an explicit threadId. Only "accept" and "decline" ever arrive here. */
   readonly respondApproval: (
@@ -124,17 +130,22 @@ export function isRecommendedLabel(label: string): boolean {
 }
 
 export function userInputAnswerable(input: ThreadPendingUserInput): boolean {
-  if (input.responseCapability === "not_resumable") return false;
+  if (input.responseCapability !== "live") return false;
   if (input.questions.length !== 1) return false;
   const question = input.questions[0];
   if (!question || question.multiSelect) return false;
   return question.options.length > 0 || question.allowCustomAnswer !== false;
 }
 
-export function approvalAnswerable(approval: ThreadPendingApproval): boolean {
+export function approvalAnswerable(
+  approval: ThreadPendingApproval,
+  commands: ReadonlySet<string>,
+): boolean {
   if (approval.responseCapability !== "live") return false;
-  // Never approve what the human could not read.
-  if (!approval.detail) return false;
+  // Only a shell command; every other request (and Codex with a reason, Claude's title or 400-char summary) shows other text.
+  if (approval.requestKind !== "command") return false;
+  // Never approve what the human could not read in full.
+  if (!approval.detail || !commands.has(approval.detail.trim())) return false;
   if (approval.options === undefined) return true;
   const offered = new Set(approval.options.map((option) => option.decision));
   return offered.has("accept") && offered.has("decline");
@@ -159,12 +170,12 @@ function questionItem(input: ThreadPendingUserInput): RequestItem {
   };
 }
 
-function approvalItem(approval: ThreadPendingApproval): RequestItem {
+function approvalItem(approval: ThreadPendingApproval, commands: ReadonlySet<string>): RequestItem {
   return {
     requestId: approval.requestId,
     kind: "approval",
     createdAt: approval.createdAt,
-    answerable: approvalAnswerable(approval),
+    answerable: approvalAnswerable(approval, commands),
     approval: {
       detail: approval.detail ?? "",
       reason: approval.reason ?? null,
@@ -174,8 +185,11 @@ function approvalItem(approval: ThreadPendingApproval): RequestItem {
 }
 
 /** Pure mapping of the thread's pending requests to the wire items, oldest first. */
-export function requestItems(pending: PendingThreadRequests): RequestItem[] {
-  return [...pending.userInputs.map(questionItem), ...pending.approvals.map(approvalItem)].toSorted(
+export function requestItems(pending: PendingSnapshot): RequestItem[] {
+  return [
+    ...pending.userInputs.map(questionItem),
+    ...pending.approvals.map((approval) => approvalItem(approval, pending.commands)),
+  ].toSorted(
     (a, b) => a.createdAt.localeCompare(b.createdAt) || a.requestId.localeCompare(b.requestId),
   );
 }
@@ -183,7 +197,7 @@ export function requestItems(pending: PendingThreadRequests): RequestItem[] {
 interface Watch {
   readonly threadId: string;
   unsubscribe: () => void;
-  pending: PendingThreadRequests | null;
+  pending: PendingSnapshot | null;
   /** The parent asked and has not been answered yet. */
   awaitingFirst: boolean;
   timer: ReturnType<typeof setTimeout> | null;
@@ -369,6 +383,8 @@ export type ParsedRespond =
       readonly threadId: string;
       readonly requestId: string;
       readonly decision: "accept" | "decline";
+      /** The command text the dashboard showed; null when the message carries none. */
+      readonly detail: string | null;
     };
 
 function idField(value: unknown): string | null {
@@ -385,7 +401,8 @@ export function parseRespond(data: unknown): ParsedRespond | null {
   if (message?.kind === "approval") {
     const decision = message.decision;
     if (decision !== "accept" && decision !== "decline") return null;
-    return { kind: "approval", ticket, threadId, requestId, decision };
+    const detail = typeof message.detail === "string" ? message.detail : null;
+    return { kind: "approval", ticket, threadId, requestId, decision, detail };
   }
   if (message?.kind !== "question") return null;
   const hasLabel = message.optionLabel !== undefined && message.optionLabel !== null;
@@ -437,13 +454,13 @@ function currentPending(
   host: TicketRequestsHost,
   ticket: number,
   threadId: string,
-): Promise<PendingThreadRequests | null> {
+): Promise<PendingSnapshot | null> {
   const watch = watches.get(ticket);
   if (watch && watch.threadId === threadId && watch.pending) return Promise.resolve(watch.pending);
   return new Promise((resolve) => {
     let done = false;
     let release: (() => void) | null = null;
-    const finish = (value: PendingThreadRequests | null) => {
+    const finish = (value: PendingSnapshot | null) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
@@ -508,12 +525,20 @@ export async function handleRespond(request: ParsedRespond, deps: RequestDeps = 
         [question.id]: answer,
       });
     } else {
-      if (!approval || !approvalAnswerable(approval)) return reply("error");
+      if (!approval || !approvalAnswerable(approval, pending.commands)) return reply("error");
+      // What the human approved must be exactly what is open now; anything else releases nothing.
+      if (request.detail === null || request.detail !== approval.detail) return reply("gone");
       answered.add(key);
       ok = await host.respondApproval(request.threadId, request.requestId, request.decision);
     }
     delivered = ok;
-    return reply(ok ? "ok" : "error");
+    if (ok) return reply("ok");
+    // Answered elsewhere in the meantime: the live watch no longer lists it.
+    const still = watches.get(request.ticket)?.pending;
+    const open =
+      still?.userInputs.some((i) => i.requestId === request.requestId) ||
+      still?.approvals.some((a) => a.requestId === request.requestId);
+    return reply(still && !open ? "gone" : "error");
   } catch {
     return reply("error");
   } finally {

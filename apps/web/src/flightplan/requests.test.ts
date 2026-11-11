@@ -1,4 +1,3 @@
-import type { PendingThreadRequests } from "@t3tools/client-runtime/state/thread-requests";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { PARENT_ORIGIN, applyParentMessage, acceptParentSource } from "./channel";
@@ -11,6 +10,7 @@ import {
   requestItems,
   resetTicketRequests,
   setTicketRequestsHost,
+  type PendingSnapshot,
   type TicketRequestsHost,
 } from "./requests";
 
@@ -60,21 +60,25 @@ function approval(requestId: string, extra: Record<string, unknown> = {}) {
   };
 }
 
-function pendingOf(userInputs: unknown[] = [], approvals: unknown[] = []): PendingThreadRequests {
-  return { userInputs, approvals } as unknown as PendingThreadRequests;
+function pendingOf(
+  userInputs: unknown[] = [],
+  approvals: unknown[] = [],
+  commands: string[] = ["rm -rf build/"],
+): PendingSnapshot {
+  return { userInputs, approvals, commands: new Set(commands) } as unknown as PendingSnapshot;
 }
 
 function setup(
   shells: Shell[],
-  pending: PendingThreadRequests | null,
+  pending: PendingSnapshot | null,
   records: Record<number, string> = {},
 ) {
-  let push: ((p: PendingThreadRequests | null) => void) | null = null;
+  let push: ((p: PendingSnapshot | null) => void) | null = null;
   const release = vi.fn();
   const host = {
     ready: () => true,
     shells: () => shells,
-    watch: vi.fn((_thread: string, cb: (p: PendingThreadRequests | null) => void) => {
+    watch: vi.fn((_thread: string, cb: (p: PendingSnapshot | null) => void) => {
       push = cb;
       cb(pending);
       return release;
@@ -99,7 +103,7 @@ function setup(
     lookup,
     storage,
     release,
-    push: (p: PendingThreadRequests | null) => push?.(p),
+    push: (p: PendingSnapshot | null) => push?.(p),
   };
 }
 
@@ -310,7 +314,13 @@ describe("fp:respond (OP#1842)", () => {
 
   it("approves or declines a command only once and never with a wider decision", async () => {
     const s = base();
-    const a = { ticket: 12, threadId: "t1", requestId: "r2", kind: "approval" as const };
+    const a = {
+      ticket: 12,
+      threadId: "t1",
+      requestId: "r2",
+      kind: "approval" as const,
+      detail: "rm -rf build/",
+    };
     await handleRespond({ ...a, decision: "accept" }, s);
     await handleRespond({ ...a, decision: "decline" }, s);
     expect(s.host.respondApproval).toHaveBeenCalledTimes(1);
@@ -330,6 +340,105 @@ describe("fp:respond (OP#1842)", () => {
     await handleRespond(q({ requestId: "r2" }), s);
     expect(s.host.respondUserInput).not.toHaveBeenCalled();
     expect(sent(s.target)[0]).toMatchObject({ result: "error" });
+  });
+
+  it("offers only shell commands whose text is the whole command", () => {
+    const items = requestItems(
+      pendingOf(
+        [{ ...userInput("m"), responseCapability: "message" }],
+        [
+          approval("w", { requestKind: "file-change", detail: "Write: /x" }),
+          approval("t", { detail: "Task: a long summary" }),
+          approval("ok"),
+        ],
+      ),
+    );
+    expect(items.map((i) => [i.requestId, i.answerable])).toEqual(
+      [
+        ["m", false],
+        ["ok", true],
+        ["w", false],
+        ["t", false],
+      ].toSorted(
+        (a, b) =>
+          items.findIndex((i) => i.requestId === a[0]) -
+          items.findIndex((i) => i.requestId === b[0]),
+      ),
+    );
+  });
+
+  it("refuses to approve a request that is not an answerable command", async () => {
+    const s = setup(
+      [waiting("t1")],
+      pendingOf(
+        [],
+        [approval("w", { requestKind: "file-change", detail: "Write: /x" })],
+        ["Write: /x"],
+      ),
+      { 12: "t1" },
+    );
+    await handleRespond(
+      {
+        ticket: 12,
+        threadId: "t1",
+        requestId: "w",
+        kind: "approval",
+        decision: "accept",
+        detail: "Write: /x",
+      },
+      s,
+    );
+    expect(s.host.respondApproval).not.toHaveBeenCalled();
+    expect(sent(s.target)[0]).toMatchObject({ result: "error" });
+  });
+
+  it("releases nothing when the shown detail differs or is missing", async () => {
+    const s = base();
+    const a = {
+      ticket: 12,
+      threadId: "t1",
+      requestId: "r2",
+      kind: "approval" as const,
+      decision: "accept" as const,
+    };
+    await handleRespond({ ...a, detail: "rm -rf /" }, s);
+    await handleRespond({ ...a, detail: null }, s);
+    expect(s.host.respondApproval).not.toHaveBeenCalled();
+    expect(sent(s.target).map((m) => m.result)).toEqual(["gone", "gone"]);
+    expect(parseRespond({ ...a })).toMatchObject({ detail: null });
+    await handleRespond({ ...a, detail: "rm -rf build/" }, s);
+    expect(s.host.respondApproval).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a question that is only answerable as a message", async () => {
+    const s = setup(
+      [waiting("t1")],
+      pendingOf([{ ...userInput("r1"), responseCapability: "message" }]),
+      { 12: "t1" },
+    );
+    await handleRespond(q(), s);
+    expect(s.host.respondUserInput).not.toHaveBeenCalled();
+    expect(sent(s.target)[0]).toMatchObject({ result: "error" });
+  });
+
+  it("reports gone when the send fails because the request was answered elsewhere", async () => {
+    const s = base();
+    await handleRequestsGet(12, s);
+    s.host.respondUserInput.mockImplementationOnce(async () => {
+      s.push(pendingOf());
+      return false;
+    });
+    await handleRespond(q(), s);
+    expect(sent(s.target).at(-1)).toMatchObject({ type: "fp:responded", result: "gone" });
+  });
+
+  it("checks the server assignment again on every message", async () => {
+    const s = base();
+    await handleRespond(q(), s);
+    s.lookup.mockResolvedValue({ threadId: "t2" });
+    await handleRespond(q({ requestId: "r1b" }), s);
+    expect(sent(s.target).map((m) => m.result)).toEqual(["ok", "error"]);
+    expect(s.host.respondUserInput).toHaveBeenCalledTimes(1);
   });
 
   it("validates the message fields", () => {
