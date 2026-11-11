@@ -33,6 +33,13 @@
  *    a pattern directly under an allowed root (`/tmp/*`) is refused.
  *  - The branch for a bare `git push` is read with `git symbolic-ref` at hook time; unknown branch means free.
  *  - The list does not replace a sandbox or a host-level control. Against a misled agent only OP#1845 helps.
+ *
+ * Denial log (OP#1890). Each denial appends one line to `flightplan-denials.jsonl` next to the ticket-thread
+ * mapping (mode 0600): time (UTC), thread id, ticket, tool name, category, protection flag. The category is set
+ * where the reason arises (`Denial`), no command text and no path from the command is stored. A write error is
+ * swallowed. `GET /api/flightplan/denials` sums it per ticket for the dashboard (`fp:activity` field `denials`).
+ * Limit: while `t3-fp` runs as root, an agent can change or delete that file. The count is a hint for the
+ * human, not a security proof (OP#1845).
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -41,7 +48,7 @@ import * as NodePath from "node:path";
 
 import type { HookCallback } from "@anthropic-ai/claude-agent-sdk";
 
-import { readTicketThreadMap } from "./ticketThreads.ts";
+import { readTicketThreadMap, ticketForThread } from "./ticketThreads.ts";
 
 const DENYLIST_ENV = "T3CODE_FP_DENYLIST";
 
@@ -53,6 +60,34 @@ export function denylistEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 
 export function denyMessage(reason: string): string {
   return `Gesperrt für Ticket-Threads (Flightplan-Sperrliste): ${reason}. Führe das nicht auf anderem Weg aus. Stelle stattdessen eine Rückfrage mit fp-op ask.`;
+}
+
+/**
+ * OP#1890: category of a denial, set where the reason arises. Never derived from the text afterwards.
+ * The category names the kind of rule, never the command or a path from the command.
+ */
+export type DenialCategory =
+  | "git-push-main"
+  | "git-push-force"
+  | "sudo"
+  | "systemctl"
+  | "docker"
+  | "rm-ausserhalb"
+  | "schreibziel-geschuetzt"
+  | "fp-op-doctor"
+  | "zu-lang"
+  | "pruefung-fehlgeschlagen";
+
+export interface Denial {
+  /** Fixed German text for the agent. May contain command parts; it is NEVER written to the log. */
+  readonly reason: string;
+  readonly category: DenialCategory;
+  /** True when a protection target was hit: token or credential path, main/master, Docker. */
+  readonly protectedHit: boolean;
+}
+
+function denial(category: DenialCategory, reason: string, protectedHit = false): Denial {
+  return { reason, category, protectedHit };
 }
 
 let warnedBrokenMapping = false;
@@ -273,7 +308,11 @@ const MAX_DEPTH = 3;
 const MAX_CODE = 64 * 1024;
 const MAX_PUSH_DIRS = 8;
 const MAX_FIND_COMBINATIONS = 200;
-const TOO_LONG = "Befehlstext zu lang für die Sperrlisten-Prüfung; kürzer fassen";
+const TOO_LONG: Denial = {
+  reason: "Befehlstext zu lang für die Sperrlisten-Prüfung; kürzer fassen",
+  category: "zu-lang",
+  protectedHit: false,
+};
 const REDIRECT_WRITE = "\u0000W";
 const REDIRECT_READ = "\u0000R";
 
@@ -484,8 +523,16 @@ function stripPrefix(tokens: string[]): string[] {
 }
 
 const FORCE_PUSH_FLAG = /^-[A-Za-z]*f[A-Za-z]*$/;
-const PUSH_MAIN_REASON =
-  "git push auf main oder master ist Sache des Menschen; arbeite auf einem eigenen Branch und eröffne einen PR";
+const PUSH_MAIN_REASON: Denial = {
+  reason:
+    "git push auf main oder master ist Sache des Menschen; arbeite auf einem eigenen Branch und eröffne einen PR",
+  category: "git-push-main",
+  protectedHit: true,
+};
+const PUSH_FORCE_REASON = denial(
+  "git-push-force",
+  "git push mit --force, -f oder --force-with-lease überschreibt fremde Stände",
+);
 
 function protectedBranch(refspec: string): boolean {
   const dst = refspec
@@ -496,7 +543,7 @@ function protectedBranch(refspec: string): boolean {
   return dst === "main" || dst === "master";
 }
 
-function checkGitPush(args: string[], ctx: DenylistContext): string | null {
+function checkGitPush(args: string[], ctx: DenylistContext): Denial | null {
   let i = 0;
   const valueOpts = new Set([
     "-C",
@@ -521,6 +568,7 @@ function checkGitPush(args: string[], ctx: DenylistContext): string | null {
   if (args[i] !== "push") return null;
   const positional: string[] = [];
   let tags = false;
+  let forced = false;
   for (let j = i + 1; j < args.length; j += 1) {
     const a = args[j]!;
     if (a === "--") {
@@ -534,10 +582,10 @@ function checkGitPush(args: string[], ctx: DenylistContext): string | null {
       a === "--force-if-includes" ||
       a.startsWith("--force-with-lease")
     ) {
-      return "git push mit --force, -f oder --force-with-lease überschreibt fremde Stände";
+      forced = true;
     }
     if (!a.startsWith("--") && FORCE_PUSH_FLAG.test(a)) {
-      return "git push mit --force, -f oder --force-with-lease überschreibt fremde Stände";
+      forced = true;
     }
     if (a === "--tags") tags = true;
     if (
@@ -553,30 +601,34 @@ function checkGitPush(args: string[], ctx: DenylistContext): string | null {
     if (a.startsWith("-")) continue;
     positional.push(a);
   }
-  for (const spec of positional.slice(1)) {
-    if (spec.startsWith("+")) return "git push mit +Refspec erzwingt den Push";
-  }
-  for (const spec of positional) {
-    if (protectedBranch(spec)) return PUSH_MAIN_REASON;
-  }
+  // OP#1890: the decision is the same as before (force, +ref and main/master all deny); only the flag changes:
+  // a force push that points at main/master (or, bare, runs on it) still counts as a protection target.
+  const plusRef = positional.slice(1).some((spec) => spec.startsWith("+"));
   const needsBranch =
     (positional.length <= 1 && !tags) || positional.slice(1).some((s) => s === "HEAD" || s === "@");
+  const mainTarget = positional.some(protectedBranch);
+  let mainBranch = false;
   if (needsBranch && dirKnown && dir !== null) {
     ctx.pushDirs?.add(dir);
     const branch = ctx.branchOf?.(dir);
-    if (branch === "main" || branch === "master") return PUSH_MAIN_REASON;
+    mainBranch = branch === "main" || branch === "master";
   }
+  if (forced || plusRef) {
+    const text = forced ? PUSH_FORCE_REASON.reason : "git push mit +Refspec erzwingt den Push";
+    return denial("git-push-force", text, mainTarget || mainBranch);
+  }
+  if (mainTarget || mainBranch) return PUSH_MAIN_REASON;
   return null;
 }
 
-function checkSystemctl(args: string[]): string | null {
+function checkSystemctl(args: string[]): Denial | null {
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i]!;
     if (a.startsWith("-")) {
       if (SYSTEMCTL_VALUE_OPTS.has(a)) i += 1;
       continue;
     }
-    return SYSTEMCTL_DENY.has(a) ? `systemctl ${a} ändert Dienste` : null;
+    return SYSTEMCTL_DENY.has(a) ? denial("systemctl", `systemctl ${a} ändert Dienste`) : null;
   }
   return null;
 }
@@ -591,14 +643,17 @@ const SERVICE_DENY = new Set([
   "condrestart",
 ]);
 
-function checkService(args: string[]): string | null {
+function checkService(args: string[]): Denial | null {
   const positional = args.filter((a) => !a.startsWith("-"));
   const verb = positional[1];
-  return verb !== undefined && SERVICE_DENY.has(verb) ? `service ${verb} ändert Dienste` : null;
+  return verb !== undefined && SERVICE_DENY.has(verb)
+    ? denial("systemctl", `service ${verb} ändert Dienste`)
+    : null;
 }
 
-function checkDocker(command: string, args: string[]): string | null {
-  const reason = (verb: string) => `docker ${verb} ändert Container, Images, Netze oder Volumes`;
+function checkDocker(command: string, args: string[]): Denial | null {
+  const reason = (verb: string) =>
+    denial("docker", `docker ${verb} ändert Container, Images, Netze oder Volumes`, true);
   let rest = args;
   let isCompose = command === "docker-compose";
   if (!isCompose) {
@@ -657,7 +712,7 @@ function resolveDir(raw: string, cwd: string | null, homeOption?: string): strin
 
 const RM_ROOTS = ["/tmp", "/var/tmp", "/root/.local/state/flightplan/worktrees"];
 
-function checkRm(args: string[], ctx: DenylistContext, home: string): string | null {
+function checkRm(args: string[], ctx: DenylistContext, home: string): Denial | null {
   let recursive = false;
   const targets: string[] = [];
   let optionsDone = false;
@@ -672,21 +727,34 @@ function checkRm(args: string[], ctx: DenylistContext, home: string): string | n
   const cwd = rootCwd !== null && rootCwd !== "/" ? NodePath.posix.normalize(rootCwd) : null;
   for (const raw of targets) {
     const path = resolveTarget(raw, ctx, home);
-    if (path === null) return `rekursives rm auf einen nicht prüfbaren Pfad (${raw})`;
+    if (path === null)
+      return denial("rm-ausserhalb", `rekursives rm auf einen nicht prüfbaren Pfad (${raw})`);
     if (path === "") {
-      return `rekursives rm auf ${raw}, der wirksame Arbeitsordner ist unbekannt`;
+      return denial(
+        "rm-ausserhalb",
+        `rekursives rm auf ${raw}, der wirksame Arbeitsordner ist unbekannt`,
+      );
     }
     if (path === "/" || path === home || /^\/\*+$/.test(path)) {
-      return `rekursives rm auf ${raw} löscht den Host oder das Home-Verzeichnis`;
+      return denial(
+        "rm-ausserhalb",
+        `rekursives rm auf ${raw} löscht den Host oder das Home-Verzeichnis`,
+      );
     }
     const below = (root: string) => path.startsWith(root.endsWith("/") ? root : `${root}/`);
     if (cwd !== null && below(cwd)) continue;
     const root = RM_ROOTS.find(below);
     if (root === undefined) {
-      return `rekursives rm auf ${raw} außerhalb des Arbeitsordners (erlaubt: darunter, /tmp, /var/tmp, Flightplan-Worktrees)`;
+      return denial(
+        "rm-ausserhalb",
+        `rekursives rm auf ${raw} außerhalb des Arbeitsordners (erlaubt: darunter, /tmp, /var/tmp, Flightplan-Worktrees)`,
+      );
     }
     if (/[*?[]/.test(path.slice(root.length + 1).split("/")[0]!)) {
-      return `rekursives rm auf ${raw} mit Muster direkt unter ${root} würde fremde Arbeit löschen`;
+      return denial(
+        "rm-ausserhalb",
+        `rekursives rm auf ${raw} mit Muster direkt unter ${root} würde fremde Arbeit löschen`,
+      );
     }
   }
   return null;
@@ -722,7 +790,7 @@ function splitArgs(
   return { positional, targetDir, flags };
 }
 
-function writeReason(paths: ReadonlyArray<string>, ctx: DenylistContext): string | null {
+function writeReason(paths: ReadonlyArray<string>, ctx: DenylistContext): Denial | null {
   for (const raw of paths) {
     const reason = checkWritePath(raw, ctx);
     if (reason !== null) return reason;
@@ -732,7 +800,7 @@ function writeReason(paths: ReadonlyArray<string>, ctx: DenylistContext): string
 
 const IGNORED_REDIRECTS = /^\/dev\/(null|stderr|stdout|stdin|tty|fd\/\d+)$/;
 
-function checkRedirects(targets: ReadonlyArray<string>, ctx: DenylistContext): string | null {
+function checkRedirects(targets: ReadonlyArray<string>, ctx: DenylistContext): Denial | null {
   return writeReason(
     targets.filter((t) => !IGNORED_REDIRECTS.test(t)),
     ctx,
@@ -763,7 +831,7 @@ const VALUED_OPTS: Record<string, ReadonlyArray<string>> = {
   mkdir: ["-m", "--mode"],
 };
 
-function checkCopyLike(command: string, args: string[], ctx: DenylistContext): string | null {
+function checkCopyLike(command: string, args: string[], ctx: DenylistContext): Denial | null {
   const { positional, targetDir, flags } = splitArgs(args, VALUED_OPTS[command]);
   if (command === "install" && flags.some((f) => f === "-d" || f === "--directory")) {
     return writeReason(positional, ctx);
@@ -776,20 +844,25 @@ function checkCopyLike(command: string, args: string[], ctx: DenylistContext): s
   return writeReason(paths, ctx);
 }
 
-function checkSed(args: string[], ctx: DenylistContext): string | null {
+function checkSed(args: string[], ctx: DenylistContext): Denial | null {
   const inPlace = args.some((a) => /^-[A-Za-z]*i[A-Za-z.]*$/.test(a) || a.startsWith("--in-place"));
   if (!inPlace) return null;
   return writeReason(splitArgs(args, ["-e", "-f", "--expression", "--file"]).positional, ctx);
 }
 
-function checkDd(args: string[], ctx: DenylistContext): string | null {
+function checkDd(args: string[], ctx: DenylistContext): Denial | null {
   return writeReason(
     args.filter((a) => a.startsWith("of=")).map((a) => a.slice(3)),
     ctx,
   );
 }
 
-function checkFind(args: string[], ctx: DenylistContext, depth: number, home: string) {
+function checkFind(
+  args: string[],
+  ctx: DenylistContext,
+  depth: number,
+  home: string,
+): Denial | null {
   let i = 0;
   while (i < args.length && /^-[HLP]$/.test(args[i]!)) i += 1;
   const paths: string[] = [];
@@ -802,9 +875,11 @@ function checkFind(args: string[], ctx: DenylistContext, depth: number, home: st
   if (expr.includes("-delete")) {
     for (const p of paths) {
       const resolved = resolveTarget(p, ctx, home);
-      if (resolved === "/" || resolved === home) return `find -delete auf ${p}`;
+      if (resolved === "/" || resolved === home) {
+        return denial("rm-ausserhalb", `find -delete auf ${p}`);
+      }
       const reason = checkWritePath(p, ctx);
-      if (reason !== null) return `find -delete: ${reason}`;
+      if (reason !== null) return { ...reason, reason: `find -delete: ${reason.reason}` };
     }
   }
   const commands: string[][] = [];
@@ -894,7 +969,7 @@ const SCAN_COMMANDS = new Set([
 ]);
 
 /** Looks for the core commands as words in code text. Linear, text is capped. */
-function scanCode(text: string, ctx: DenylistContext): string | null {
+function scanCode(text: string, ctx: DenylistContext): Denial | null {
   if (text.length > MAX_CODE) return TOO_LONG;
   for (const part of text.split(/[\n;|&]+/)) {
     const words = part.split(/[\s"'`(),[\]{}]+/).filter((w) => w.length > 0);
@@ -907,20 +982,20 @@ function scanCode(text: string, ctx: DenylistContext): string | null {
   return null;
 }
 
-function checkWords(words: string[], ctx: DenylistContext, depth: number): string | null {
+function checkWords(words: string[], ctx: DenylistContext, depth: number): Denial | null {
   const first = words[0];
   if (first === undefined) return null;
   const command = baseName(first);
   const args = words.slice(1);
   const home = NodePath.posix.normalize(ctx.home ?? NodeOS.homedir());
-  if (command === "sudo" || command === "doas") return "sudo ist nicht erlaubt";
+  if (command === "sudo" || command === "doas") return denial("sudo", "sudo ist nicht erlaubt");
   if (command === "git") return checkGitPush(args, ctx);
   if (command === "systemctl") return checkSystemctl(args);
   if (command === "service") return checkService(args);
   if (command === "docker" || command === "docker-compose") return checkDocker(command, args);
   if (command === "fp-op") {
     return args.find((a) => !a.startsWith("-")) === "doctor"
-      ? "fp-op doctor ist nicht erlaubt"
+      ? denial("fp-op-doctor", "fp-op doctor ist nicht erlaubt")
       : null;
   }
   if (command === "rm") return checkRm(args, ctx, home);
@@ -937,13 +1012,13 @@ function checkWords(words: string[], ctx: DenylistContext, depth: number): strin
   }
   if (command === "watch") {
     const inner = splitArgsAfterOptions(args, ["-n", "--interval", "-d"]).join(" ");
-    return inner.length > MAX_CODE ? TOO_LONG : checkBash(inner, ctx, depth + 1);
+    return inner.length > MAX_CODE ? TOO_LONG : checkBashDenial(inner, ctx, depth + 1);
   }
   if (command === "ssh") {
     const rest = splitArgsAfterOptions(args, SSH_VALUED).slice(1).join(" ");
     return rest.length > MAX_CODE
       ? TOO_LONG
-      : checkBash(rest, { ...ctx, cwd: null, rootCwd: null }, depth + 1);
+      : checkBashDenial(rest, { ...ctx, cwd: null, rootCwd: null }, depth + 1);
   }
   let code: string | null = null;
   let parse = false;
@@ -961,7 +1036,7 @@ function checkWords(words: string[], ctx: DenylistContext, depth: number): strin
   if (code === null) return null;
   if (code.length > MAX_CODE) return TOO_LONG;
   if (parse) {
-    const verdict = checkBash(code, ctx, depth + 1);
+    const verdict = checkBashDenial(code, ctx, depth + 1);
     if (verdict !== null) return verdict;
   }
   return scanCode(code, ctx);
@@ -1083,7 +1158,7 @@ function cdTarget(words: string[], ctx: DenylistContext): string | null | undefi
 }
 
 /** Reason for a deny, or null. The effective directory follows literal `cd` in the chain. */
-export function checkBash(command: string, start: DenylistContext, depth = 0): string | null {
+function checkBashDenial(command: string, start: DenylistContext, depth = 0): Denial | null {
   const ctx = start.rootCwd === undefined ? { ...start, rootCwd: start.cwd } : start;
   const { main, bodies } = splitHeredocs(command);
   const segments = tokenize(main);
@@ -1114,7 +1189,7 @@ export function checkBash(command: string, start: DenylistContext, depth = 0): s
     for (const body of bodies) {
       if (body.length > MAX_CODE) return TOO_LONG;
       const verdict =
-        (depth < MAX_DEPTH ? checkBash(body, ctx, depth + 1) : null) ?? scanCode(body, ctx);
+        (depth < MAX_DEPTH ? checkBashDenial(body, ctx, depth + 1) : null) ?? scanCode(body, ctx);
       if (verdict !== null) return verdict;
     }
   }
@@ -1137,7 +1212,7 @@ function under(path: string, root: string): boolean {
   return path === root || path.startsWith(`${root}/`);
 }
 
-function checkWritePath(rawPath: string, ctx: DenylistContext): string | null {
+function checkWritePath(rawPath: string, ctx: DenylistContext): Denial | null {
   const home = NodePath.posix.normalize(ctx.home ?? NodeOS.homedir());
   const resolved = resolveTarget(rawPath, ctx, home);
   const path = resolved === null || resolved === "" ? NodePath.posix.normalize(rawPath) : resolved;
@@ -1148,16 +1223,40 @@ function checkWritePath(rawPath: string, ctx: DenylistContext): string | null {
   const hit =
     protectedRoots.some((root) => under(path, root)) ||
     /^\/home\/[^/]+\/\.(ssh|config|hermes)(\/|$)/.test(path);
-  if (hit) return `Schreiben nach ${path} ist nicht erlaubt`;
+  if (hit) {
+    return denial(
+      "schreibziel-geschuetzt",
+      `Schreiben nach ${path} ist nicht erlaubt`,
+      tokenPath(path, home),
+    );
+  }
   const segments = path.split("/");
   const file = segments[segments.length - 1];
   if (
     (file === "settings.json" || file === "settings.local.json") &&
     segments.slice(0, -1).includes(".claude")
   ) {
-    return `Schreiben in die Claude-Einstellungen ${path} ist nicht erlaubt`;
+    return denial(
+      "schreibziel-geschuetzt",
+      `Schreiben in die Claude-Einstellungen ${path} ist nicht erlaubt`,
+      true,
+    );
   }
   return null;
+}
+
+/** Credential and token locations: SSH, config (Cloudflare, bws), Hermes homes, Claude home. */
+function tokenPath(path: string, home: string): boolean {
+  return [".ssh", ".config", ".hermes", ".claude"].some(
+    (dir) =>
+      under(path, `${home}/${dir}`) ||
+      under(path, `/root/${dir}`) ||
+      new RegExp(`^/home/[^/]+/\\${dir}(/|$)`).test(path),
+  );
+}
+
+export function checkBash(command: string, start: DenylistContext): string | null {
+  return checkBashDenial(command, start)?.reason ?? null;
 }
 
 export function checkToolCall(
@@ -1165,12 +1264,20 @@ export function checkToolCall(
   toolInput: unknown,
   ctx: DenylistContext,
 ): string | null {
+  return checkToolCallDenial(toolName, toolInput, ctx)?.reason ?? null;
+}
+
+function checkToolCallDenial(
+  toolName: string,
+  toolInput: unknown,
+  ctx: DenylistContext,
+): Denial | null {
   const input =
     toolInput !== null && typeof toolInput === "object"
       ? (toolInput as Record<string, unknown>)
       : {};
   if (toolName === "Bash") {
-    return typeof input.command === "string" ? checkBash(input.command, ctx) : null;
+    return typeof input.command === "string" ? checkBashDenial(input.command, ctx) : null;
   }
   if (FILE_TOOLS.has(toolName)) {
     const path = input.file_path ?? input.notebook_path;
@@ -1194,33 +1301,131 @@ function readBranch(dir: string): Promise<string | null> {
  * Checks a tool call. A bare push needs the branch: the first pass collects the directories, the branches are
  * read once, the second pass decides. Unknown branch means free.
  */
-export async function checkToolCallWithBranches(
+async function checkToolCallWithBranchesDenial(
   toolName: string,
   toolInput: unknown,
   ctx: DenylistContext,
   lookup: (dir: string) => Promise<string | null> = readBranch,
-): Promise<string | null> {
+): Promise<Denial | null> {
   const pushDirs = new Set<string>();
-  const first = checkToolCall(toolName, toolInput, { ...ctx, pushDirs });
-  if (first !== null || pushDirs.size === 0) return first;
+  const first = checkToolCallDenial(toolName, toolInput, { ...ctx, pushDirs });
+  if (pushDirs.size === 0) return first;
+  // A forced push is denied in any case; the second pass only settles whether it hit main/master.
+  if (first !== null && (first.protectedHit || first.category !== "git-push-force")) return first;
   if (pushDirs.size > MAX_PUSH_DIRS) {
-    return "zu viele git push in einem Befehl für die Sperrlisten-Prüfung; aufteilen";
+    if (first !== null) return first;
+    return denial(
+      "zu-lang",
+      "zu viele git push in einem Befehl für die Sperrlisten-Prüfung; aufteilen",
+    );
   }
   const branches = new Map<string, string | null>();
   await Promise.all([...pushDirs].map(async (dir) => branches.set(dir, await lookup(dir))));
-  return checkToolCall(toolName, toolInput, { ...ctx, branchOf: (dir) => branches.get(dir) });
+  const second = checkToolCallDenial(toolName, toolInput, {
+    ...ctx,
+    branchOf: (dir) => branches.get(dir),
+  });
+  return second ?? first;
+}
+
+export async function checkToolCallWithBranches(
+  toolName: string,
+  toolInput: unknown,
+  ctx: DenylistContext,
+  lookup?: (dir: string) => Promise<string | null>,
+): Promise<string | null> {
+  return (await checkToolCallWithBranchesDenial(toolName, toolInput, ctx, lookup))?.reason ?? null;
+}
+
+/**
+ * OP#1890: where the hook logs its denials. The thread ids are those the adapter knows (thread and root);
+ * the ticket is looked up in the ticket-thread mapping at write time.
+ */
+export interface DenialLogTarget {
+  readonly ticketThreadsFile: string;
+  readonly threadIds: ReadonlyArray<string>;
+  /** Test hook: the size above which the log is cut to its newer half. Default 2 MB. */
+  readonly maxBytes?: number;
+}
+
+const DENIALS_MAX_BYTES = 2 * 1024 * 1024;
+
+/** Cuts the log to its newer half at a line border: temp file in the same folder (0600), then rename. */
+function trimDenialLog(file: string, maxBytes: number): void {
+  try {
+    if (NodeFS.statSync(file).size <= maxBytes) return;
+    const data = NodeFS.readFileSync(file);
+    const from = data.indexOf(0x0a, Math.floor(data.length / 2));
+    if (from < 0) return;
+    const tmp = `${file}.${process.pid}.tmp`;
+    NodeFS.writeFileSync(tmp, data.subarray(from + 1), { mode: 0o600 });
+    NodeFS.renameSync(tmp, file);
+  } catch {
+    // Trimming is housekeeping; a failure leaves the log as it is and never touches the verdict.
+  }
+}
+
+export const DENIALS_FILE_NAME = "flightplan-denials.jsonl";
+
+/** The log lies next to the ticket-thread mapping (the userdata folder under the base folder). */
+export function denialLogFile(ticketThreadsFile: string): string {
+  return NodePath.join(NodePath.dirname(ticketThreadsFile), DENIALS_FILE_NAME);
+}
+
+export interface DenialRecord {
+  readonly at: string;
+  readonly threadId: string;
+  readonly ticket: string | null;
+  readonly tool: string;
+  readonly category: DenialCategory;
+  readonly protected: boolean;
+}
+
+/**
+ * Appends one line per denial (0600). No command text and no path from the command: only time (UTC), thread,
+ * ticket, tool name, category and the protection flag. A write error is swallowed; it must not disturb the hook.
+ */
+function appendDenial(
+  target: DenialLogTarget,
+  toolName: string,
+  verdict: Denial,
+  now: Date = new Date(),
+): void {
+  try {
+    const map = readTicketThreadMap(target.ticketThreadsFile);
+    const threadId = target.threadIds[0] ?? "";
+    const ticket =
+      target.threadIds
+        .map((id) => ticketForThread(map, id))
+        .find((candidate) => candidate !== undefined) ?? null;
+    const record: DenialRecord = {
+      at: now.toISOString(),
+      threadId,
+      ticket,
+      tool: toolName.slice(0, 64),
+      category: verdict.category,
+      protected: verdict.protectedHit,
+    };
+    const file = denialLogFile(target.ticketThreadsFile);
+    NodeFS.mkdirSync(NodePath.dirname(file), { recursive: true, mode: 0o700 });
+    NodeFS.appendFileSync(file, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    trimDenialLog(file, target.maxBytes ?? DENIALS_MAX_BYTES);
+  } catch {
+    // The log is a hint for the human; a failed write must not change the verdict.
+  }
 }
 
 /** The `PreToolUse` hook for the SDK `hooks` option. The hook input carries the session directory. */
 export function makeDenylistPreToolUseHook(
   fallbackCwd: string | null,
   lookup?: (dir: string) => Promise<string | null>,
+  denialLog?: DenialLogTarget,
 ): HookCallback {
   return async (input) => {
     if (input.hook_event_name !== "PreToolUse") return {};
-    let reason: string | null;
+    let verdict: Denial | null;
     try {
-      reason = await checkToolCallWithBranches(
+      verdict = await checkToolCallWithBranchesDenial(
         input.tool_name,
         input.tool_input,
         { cwd: input.cwd || fallbackCwd },
@@ -1228,14 +1433,15 @@ export function makeDenylistPreToolUseHook(
       );
     } catch {
       // A check that fails must not let the call through.
-      reason = "die Prüfung des Aufrufs ist fehlgeschlagen";
+      verdict = denial("pruefung-fehlgeschlagen", "die Prüfung des Aufrufs ist fehlgeschlagen");
     }
-    if (reason === null) return {};
+    if (verdict === null) return {};
+    if (denialLog !== undefined) appendDenial(denialLog, input.tool_name, verdict);
     return {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason: denyMessage(reason),
+        permissionDecisionReason: denyMessage(verdict.reason),
       },
     };
   };

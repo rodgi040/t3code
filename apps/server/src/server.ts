@@ -26,6 +26,7 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
 import * as ServerConfig from "./config.ts";
+import * as FlightplanDenialsHttp from "./flightplan/denialsHttp.ts";
 import * as FlightplanTicketHttp from "./flightplan/ticketHttp.ts";
 import { withUntracedRequests } from "./http.ts";
 import * as ServerHttp from "./http.ts";
@@ -738,6 +739,7 @@ const layerMakeRoutes = Layer.mergeAll(
     DeviceHubProxy.layer,
     ServerBrowserStream.routeLayer,
     FlightplanTicketHttp.layer,
+    FlightplanDenialsHttp.layer,
     ServerHttp.layerStaticAndDevRoute,
     Ws.layer,
   ),

@@ -579,6 +579,42 @@ export async function ticketActivityStates(
   return [...byTicket.values()].sort((a, b) => a.ticket - b.ticket);
 }
 
+/** Flightplan OP#1890: per ticket, denials of the deny list. Same shape as `GET /api/flightplan/denials`. */
+export interface TicketDenials {
+  readonly count: number;
+  readonly protected: boolean;
+  readonly maxInThread: number;
+  readonly lastCategory: string;
+}
+export type DenialsLookup = () => Promise<unknown>;
+
+async function readDenialsRecord(): Promise<unknown> {
+  const response = await fetch("/api/flightplan/denials", { credentials: "same-origin" });
+  if (!response.ok) return null;
+  return (await response.json()) as unknown;
+}
+
+/** Keeps only well-formed entries with count >= 1; anything else (error, bad shape) gives no entry. */
+export function normalizeDenials(raw: unknown): Record<string, TicketDenials> {
+  const out: Record<string, TicketDenials> = {};
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [ticket, value] of Object.entries(raw)) {
+    if (!/^\d+$/.test(ticket) || value === null || typeof value !== "object") continue;
+    const row = value as Record<string, unknown>;
+    const count = Number(row.count);
+    if (!Number.isInteger(count) || count < 1) continue;
+    const maxInThread = Number(row.maxInThread);
+    out[ticket] = {
+      count,
+      protected: row.protected === true,
+      maxInThread: Number.isInteger(maxInThread) && maxInThread >= 1 ? maxInThread : 1,
+      lastCategory: typeof row.lastCategory === "string" ? row.lastCategory.slice(0, 40) : "",
+    };
+  }
+  return out;
+}
+
+let lastDenials: Record<string, TicketDenials> = {};
 let lastActivityReport = "";
 let activityReportSeq = 0;
 
@@ -591,13 +627,27 @@ export async function reportActivity(
     ? window.parent
     : null,
   lookup: TicketThreadLookup = readTicketThreadRecord,
+  denialsLookup: DenialsLookup = readDenialsRecord,
 ): Promise<void> {
   if (!target || !flightplanFrameFull()) return;
   const seq = ++activityReportSeq;
   const tickets = await workingTickets(state, shells, lookup);
   const states = await ticketActivityStates(state, shells, lookup);
+  // OP#1890: additive field, left out when empty or unreadable so receivers that do not know it see the old message.
+  // A failed or unreadable answer keeps the last good state (pills must not flicker); only a good answer replaces it.
+  const rawDenials = await denialsLookup().catch(() => null);
+  if (rawDenials !== null && typeof rawDenials === "object" && !Array.isArray(rawDenials)) {
+    lastDenials = normalizeDenials(rawDenials);
+  }
+  const denials = lastDenials;
   if (seq !== activityReportSeq) return;
-  const message = { type: "fp:activity", v: 2, tickets, states };
+  const message = {
+    type: "fp:activity",
+    v: 2,
+    tickets,
+    states,
+    ...(Object.keys(denials).length === 0 ? {} : { denials }),
+  };
   const key = JSON.stringify(message);
   if (!repeat && key === lastActivityReport) return;
   lastActivityReport = key;
