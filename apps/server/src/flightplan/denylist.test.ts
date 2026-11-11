@@ -2,15 +2,17 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   type DenylistContext,
   checkBash,
   checkToolCall,
+  checkToolCallWithBranches,
   denyMessage,
   denylistAppliesToThread,
   denylistEnabled,
+  resetDenylistWarnings,
   makeDenylistPreToolUseHook,
 } from "./denylist.ts";
 
@@ -56,11 +58,11 @@ describe("denylist: Bash", () => {
     "rm -rf /",
     "rm -rf ~",
     "rm -rf $HOME",
-    "rm -rf /tmp/x",
     "rm -r -f /var/log",
     "rm -rf --no-preserve-root /",
     "rm -rf ../other",
     "rm -rf /work/treeX/y",
+    "rm -rf /work/tree",
   ])("blocks %s", (command) => {
     expect(blocked(command)).toBe(true);
   });
@@ -110,9 +112,13 @@ describe("denylist: Bash", () => {
     "rm -rf node_modules",
     "rm -rf ./dist",
     "rm -rf /work/tree/build",
-    "rm -rf /work/tree",
     "rm file.txt",
     "rm -f /tmp/x",
+    "rm -rf /tmp/foo",
+    "rm -rf $TMPDIR/foo",
+    "rm -rf /root/.local/state/flightplan/worktrees/op-2-y/node_modules",
+    "cd /tmp && rm -rf foo",
+    "cd /root/.local/state/flightplan/worktrees/op-2-y && rm -rf dist",
     "systemctl status nginx",
     "systemctl is-active x",
     "systemctl list-units --type=service",
@@ -139,11 +145,12 @@ describe("denylist: Bash", () => {
     expect(blocked(command)).toBe(false);
   });
 
-  it("rm: without a known directory every recursive rm on an absolute path is blocked", () => {
+  it("rm: without a known directory a relative target is blocked, /tmp stays free", () => {
     const noCwd: DenylistContext = { cwd: null, home: "/root" };
     expect(blocked("rm -rf /work/tree/build", noCwd)).toBe(true);
-    expect(blocked("rm -rf build", noCwd)).toBe(false);
+    expect(blocked("rm -rf build", noCwd)).toBe(true);
     expect(blocked("rm -rf ../../x", noCwd)).toBe(true);
+    expect(blocked("rm -rf /tmp/x", noCwd)).toBe(false);
   });
 });
 
@@ -235,5 +242,268 @@ describe("denylist: switch, thread mapping, hook", () => {
     );
     expect(await run("Bash", { command: "pnpm test" })).toEqual({});
     expect(await run("Write", { file_path: "/etc/x" })).not.toEqual({});
+  });
+});
+
+describe("denylist: text search only on code text (A1)", () => {
+  it.each([
+    `find . -name "docker-compose*.yml" -exec grep -n "build" {} +`,
+    `find . -name "*.md" | xargs grep -n "docker run"`,
+    "bun run docker build",
+    `python3 -m pytest -k "docker and run"`,
+    "node scripts/docker-run.js",
+    "xargs grep -n sudo",
+    "find . -name '*.ts' -exec rm {} ;",
+  ])("lets %s through", (command) => {
+    expect(blocked(command)).toBe(false);
+  });
+
+  it.each([
+    "xargs rm -rf /opt/x",
+    "find /opt -exec rm -rf {} +",
+    "find /opt -name x -execdir rm -rf {} \\;",
+    "find /etc -name '*.bak' -delete",
+    "find / -delete",
+    "find . -exec sudo ls {} +",
+    "ls | xargs -n 1 docker rm",
+    `node -e "require('child_process').execSync('docker compose down')"`,
+    `bun -p "Bun.spawnSync(['sudo','ls'])"`,
+    `python -c "import os; os.system('systemctl stop x')"`,
+  ])("blocks %s", (command) => {
+    expect(blocked(command)).toBe(true);
+  });
+});
+
+describe("denylist: rm roots and cd (A2)", () => {
+  it.each([
+    "rm -rf /tmp",
+    "rm -rf /tmp/",
+    "rm -rf /tmp/../etc",
+    "rm -rf /var/tmp",
+    "rm -rf /root/.local/state/flightplan/worktrees",
+    "rm -rf /root/.local/state/flightplan/worktrees/../x",
+    "rm -rf $OTHER/x",
+    "cd / && rm -rf x",
+    "cd /etc && rm -rf x",
+    "cd && rm -rf x",
+    "cd - && rm -rf x",
+    "cd $SOMEWHERE && rm -rf x",
+    "cd /tmp; cd .. ; rm -rf x",
+  ])("blocks %s", (command) => {
+    expect(blocked(command)).toBe(true);
+  });
+
+  it("follows a literal cd for the parts after it", () => {
+    expect(blocked("cd sub && rm -rf build")).toBe(false);
+    expect(blocked("cd /tmp/a && rm -rf ../b")).toBe(false);
+    expect(blocked("cd /tmp/a && rm -rf ../../etc")).toBe(true);
+    expect(blocked("cd /tmp/a && bash -c 'rm -rf ../../etc'")).toBe(true);
+  });
+});
+
+describe("denylist: regex cost (A3)", () => {
+  // oxlint-disable-next-line t3code/no-wall-clock-in-tests -- guard against quadratic regex cost; the margin is large
+  const now = () => Date.now();
+  const timed = (command: string) => {
+    const start = now();
+    const verdict = checkBash(command, ctx);
+    return { verdict, ms: now() - start };
+  };
+
+  it.each([
+    ["node -e wrapper", `node -e "${"git push origin x ".repeat(3400)}"`],
+    ["plain words", "a ".repeat(25_000)],
+    ["git words", "git ".repeat(12_500)],
+    ["prefix words", "A=b ".repeat(12_500) + "ls"],
+    ["semicolons", "cd a;".repeat(10_000)],
+    ["shell -c", `bash -c '${"x ".repeat(25_000)}'`],
+    ["rm targets", "rm -rf " + "a ".repeat(25_000)],
+    ["find paths", "find " + "a ".repeat(25_000) + "-exec rm {} +"],
+    ["heredoc", `bash <<EOF\n${"git push origin x\n".repeat(3000)}EOF`],
+  ])("returns fast for 50 KB: %s", (_name, command) => {
+    expect(command.length).toBeGreaterThan(24_000);
+    const { ms } = timed(command);
+    expect(ms).toBeLessThan(100);
+  });
+
+  it("refuses an over-long code text with a plain message", () => {
+    expect(checkBash(`node -e "${"x ".repeat(5000)}"`, ctx)).toBe(
+      "Befehlstext zu lang für die Sperrlisten-Prüfung; kürzer fassen",
+    );
+    expect(checkBash(`bash -c '${"x ".repeat(5000)}'`, ctx)).toContain("zu lang");
+  });
+});
+
+describe("denylist: push on main/master (B1)", () => {
+  const onBranch = (branch: string | null): DenylistContext => ({
+    ...ctx,
+    branchOf: () => branch,
+  });
+
+  it.each([
+    "git push",
+    "git push origin",
+    "git push origin HEAD",
+    "git push -u origin HEAD",
+    "git push origin @",
+    "git -C /work/tree push",
+  ])("blocks %s on a checked-out main", (command) => {
+    expect(checkBash(command, onBranch("main"))).toContain("eigenen Branch");
+    expect(checkBash(command, onBranch("master"))).toContain("PR");
+    expect(checkBash(command, onBranch("feature/x"))).toBeNull();
+    expect(checkBash(command, onBranch(null))).toBeNull();
+    expect(checkBash(command, ctx)).toBeNull();
+  });
+
+  it("an explicit ref or --tags does not need the branch", () => {
+    expect(checkBash("git push origin feature/x", onBranch("main"))).toBeNull();
+    expect(checkBash("git push origin HEAD:feature/x", onBranch("main"))).toBeNull();
+    expect(checkBash("git push --tags", onBranch("main"))).toBeNull();
+    expect(checkBash("git push origin main", onBranch("feature/x"))).toContain("eigenen Branch");
+  });
+
+  it("the hook reads the branch of the effective directory once", async () => {
+    const asked: string[] = [];
+    const lookup = (dir: string) => {
+      asked.push(dir);
+      return Promise.resolve(dir === "/work/main-dir" ? "main" : "feature/x");
+    };
+    const run = (command: string) => checkToolCallWithBranches("Bash", { command }, ctx, lookup);
+    expect(await run("cd /work/main-dir && git push")).toContain("eigenen Branch");
+    expect(await run("git push")).toBeNull();
+    expect(await run("git -C /work/main-dir push origin HEAD")).toContain("eigenen Branch");
+    expect(await run("git status")).toBeNull();
+    expect(asked).toEqual(["/work/main-dir", "/work/tree", "/work/main-dir"]);
+  });
+
+  it("a failing lookup means unknown, not blocked", async () => {
+    const lookup = () => Promise.resolve(null);
+    expect(
+      await checkToolCallWithBranches("Bash", { command: "git push" }, ctx, lookup),
+    ).toBeNull();
+  });
+});
+
+describe("denylist: shell writes into protected paths (B2)", () => {
+  it.each([
+    "echo x > /etc/foo",
+    "cat a > /opt/x",
+    "echo x >> ~/.ssh/authorized_keys",
+    ">/etc/x",
+    "echo x >/etc/x",
+    "echo x &>/etc/x",
+    "echo x 2>/etc/x",
+    "tee /etc/foo",
+    "printf x | tee -a /etc/hosts",
+    "cp a /opt/x",
+    "cp -t /opt a b",
+    "mv a /opt/b",
+    "mv /opt/b ./b",
+    "sed -i s/a/b/ /etc/x",
+    "sed -i.bak -e s/a/b/ /etc/x",
+    "install -m 644 a /etc/x",
+    "install -d /opt/x",
+    "ln -s a /opt/x",
+    "chmod 777 /etc/x",
+    "chown root /etc/x",
+    "rsync -a x /opt/",
+    "dd if=a of=/etc/x",
+    "truncate -s 0 /etc/x",
+    "touch /etc/x",
+    "mkdir -p /opt/x",
+    "rm /etc/x",
+    "cd /etc && touch x",
+    "cd /etc; echo x > y",
+    "bash -c 'echo x > /etc/y'",
+  ])("blocks %s", (command) => {
+    expect(blocked(command)).toBe(true);
+  });
+
+  it.each([
+    "cat /etc/hosts",
+    "cp /etc/hosts ./kopie",
+    "cp /etc/hosts /tmp/kopie",
+    "mv a b",
+    "echo x > out.txt",
+    "echo x > /dev/null",
+    "echo x 2>/dev/null",
+    "ls 2>&1",
+    "ls >&2",
+    "ls &> /dev/null",
+    "echo x > /tmp/y",
+    "cat < /etc/hosts",
+    "sed -n p /etc/hosts",
+    "sed -i s/a/b/ file.txt",
+    "install -m 644 a ./b",
+    "rsync -a /opt/x ./x",
+    "rsync -a x host:/opt/x",
+    "tee out.log",
+    "touch ./a",
+    "mkdir -p dist/x",
+    "dd if=/etc/hosts of=./x",
+    "ln -s /etc/hosts ./hosts",
+  ])("lets %s through", (command) => {
+    expect(blocked(command)).toBe(false);
+  });
+});
+
+describe("denylist: service, fp-op words, mapping file (B3)", () => {
+  it.each(["service nginx restart", "service x start", "service x stop", "service x reload"])(
+    "blocks %s",
+    (command) => expect(blocked(command)).toBe(true),
+  );
+  it.each(["service x status", "service --status-all"])("lets %s through", (command) =>
+    expect(blocked(command)).toBe(false),
+  );
+
+  it.each([
+    "fp-op doctor",
+    "FP_OP_USER=claude fp-op doctor",
+    "fp-op --json doctor",
+    "env X=1 fp-op doctor",
+  ])("blocks %s", (command) => expect(blocked(command)).toBe(true));
+  it.each([
+    "fp-op comment 1 doctor",
+    'fp-op ask 1868 --question "soll ich doctor starten?"',
+    "fp-op get 1868",
+  ])("lets %s through", (command) => expect(blocked(command)).toBe(false));
+
+  const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "fp-denylist-map-"));
+  const write = (name: string, content: string) => {
+    const file = NodePath.join(dir, name);
+    NodeFS.writeFileSync(file, content);
+    return file;
+  };
+  const thread = "11111111-1111-4111-8111-111111111111";
+  const good = write(
+    "good.json",
+    JSON.stringify({ "1": { threadId: thread, environmentId: "e", projectId: "p" } }),
+  );
+
+  it("applies for a direct thread id and for the root thread id, not without an entry", () => {
+    expect(denylistAppliesToThread(good, [thread, "root-x"], {})).toBe(true);
+    expect(denylistAppliesToThread(good, ["child-x", thread], {})).toBe(true);
+    expect(denylistAppliesToThread(good, ["child-x", "root-x"], {})).toBe(false);
+  });
+
+  it("is off with the switch at 0", () => {
+    expect(denylistAppliesToThread(good, [thread], { T3CODE_FP_DENYLIST: "0" })).toBe(false);
+  });
+
+  it("a broken mapping file turns the list off and warns once; a missing file is silent", () => {
+    resetDenylistWarnings();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const broken = write("broken.json", "{ not json");
+      expect(denylistAppliesToThread(broken, [thread], {})).toBe(false);
+      expect(denylistAppliesToThread(broken, [thread], {})).toBe(false);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain("off for all threads");
+      expect(denylistAppliesToThread(NodePath.join(dir, "nope.json"), [thread], {})).toBe(false);
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+      resetDenylistWarnings();
+    }
   });
 });

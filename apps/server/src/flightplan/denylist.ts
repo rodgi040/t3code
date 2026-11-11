@@ -11,20 +11,26 @@
  * What it checks
  *  - Bash: every part of a simple chain (`;`, `&&`, `||`, `|`, `&`, newlines, `( )`, backticks) on its own.
  *    Leading `VAR=x`, `env`, `nice`, `ionice`, `timeout N`, `command`, `exec`, `time`, `nohup`, `setsid`,
- *    `stdbuf` are skipped, a directory in front of the command name is ignored.
- *  - Write, Edit, MultiEdit, NotebookEdit: the target path (no shell redirects, see limits).
+ *    `stdbuf` are skipped. A literal `cd <dir>` in the chain changes the directory for the parts after it.
+ *    `find ... -exec CMD`, `xargs CMD`, `ssh host CMD`, `watch CMD` check CMD as a command of its own.
+ *    `sh -c`, `bash -c`, `eval` are parsed once more. The code text of `sh|bash -c`, `eval`, `python -c`,
+ *    `node|bun -e|-p`, `perl|ruby -e`, `php -r` is also scanned word by word for the core commands
+ *    (at most 8 KB; a longer text is refused).
+ *  - Shell writes into protected paths: `>`, `>>`, `&>`, `tee`, `cp`, `mv`, `install`, `ln`, `rsync` (destination),
+ *    `sed -i`, `chmod`, `chown`, `touch`, `mkdir`, `truncate`, `dd of=`, `rm`.
+ *  - A bare `git push` or `git push origin HEAD` is refused when the hook finds the checked-out branch is main/master.
+ *  - Write, Edit, MultiEdit, NotebookEdit: the target path.
  *
  * Limits, stated honestly. This list stops the straight path, not a deliberate way around it.
- *  - It does not see through `sh -c`, `bash -c`, `eval`, `su -c` beyond one plain re-parse of the quoted
- *    text, and not through `python -c`, `node -e`, `perl -e`, `xargs`, `ssh host ...`, `find -exec`. For
- *    such wrappers it only looks for the core patterns as plain text inside their arguments.
- *  - Not seen: variables or aliases that hide a command, `$(...)` inside double quotes, base64, a script file
- *    (`bash run.sh`, `python x.py`), `git push` without arguments from a checked-out `main`, `git -c alias...`,
- *    `gh`/`curl` calls that do the same remotely, `mv`/`cp`/`tee`/`sed -i`/`>` into the protected paths
- *    (the path rule covers the file tools only), symlinks that point into a protected path, and the
- *    `rm` rule only knows the directory of the session.
+ *  - Not seen: variables or aliases that hide a command, `$(...)` inside double quotes outside the wrappers above,
+ *    base64, a script file (`bash run.sh`, `python x.py`), `git -c alias...`, `gh`/`curl` calls that do the same
+ *    remotely, a `cd` inside a subshell that is meant to stay local, symlinks that point into a protected path,
+ *    writes by interpreters other than the scanned words (`python -c "open('/etc/x','w')"`).
+ *  - The branch for a bare `git push` is read with `git symbolic-ref` at hook time; unknown branch means free.
  *  - The list does not replace a sandbox or a host-level control. Against a misled agent only OP#1845 helps.
  */
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
@@ -44,9 +50,12 @@ export function denyMessage(reason: string): string {
   return `Gesperrt für Ticket-Threads (Flightplan-Sperrliste): ${reason}. Führe das nicht auf anderem Weg aus. Stelle stattdessen eine Rückfrage mit fp-op ask.`;
 }
 
+let warnedBrokenMapping = false;
+
 /**
  * True when the switch is on and one of the thread ids (thread, its root) is the thread of a ticket in the
- * server mapping. Free chats have no entry and stay untouched.
+ * server mapping. Free chats have no entry and stay untouched. A mapping file that cannot be parsed turns the
+ * list off for every thread; that is logged once per process. A missing file is normal and silent.
  */
 export function denylistAppliesToThread(
   ticketThreadsFile: string | undefined,
@@ -54,19 +63,49 @@ export function denylistAppliesToThread(
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
   if (ticketThreadsFile === undefined || !denylistEnabled(env)) return false;
+  let raw: string;
+  try {
+    raw = NodeFS.readFileSync(ticketThreadsFile, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") warnBrokenMapping(ticketThreadsFile);
+    return false;
+  }
+  try {
+    JSON.parse(raw);
+  } catch {
+    warnBrokenMapping(ticketThreadsFile);
+    return false;
+  }
   const known = new Set(
     Object.values(readTicketThreadMap(ticketThreadsFile)).map((r) => r.threadId),
   );
   return threadIds.some((id) => known.has(id));
 }
 
-export interface DenylistContext {
-  /** Working directory of the thread. Null when unknown. */
-  readonly cwd: string | null;
-  readonly home?: string;
+function warnBrokenMapping(file: string): void {
+  if (warnedBrokenMapping) return;
+  warnedBrokenMapping = true;
+  console.warn(
+    `[flightplan] OP#1868: ${file} cannot be read; the ticket-thread deny list is off for all threads.`,
+  );
 }
 
-const MAX_DEPTH = 3;
+/** Test hook: allows the one-time warning to fire again. */
+export function resetDenylistWarnings(): void {
+  warnedBrokenMapping = false;
+}
+
+export interface DenylistContext {
+  /** Effective directory of the command. Null when unknown. */
+  readonly cwd: string | null;
+  /** Directory the session started in; the allowed roots for recursive rm follow it, not a `cd`. */
+  readonly rootCwd?: string | null;
+  readonly home?: string;
+  /** Checked-out branch per directory, resolved by the hook. Missing or null means unknown. */
+  readonly branchOf?: (dir: string) => string | null | undefined;
+  /** Collects the directories where a bare push needs the branch (first pass of the hook). */
+  readonly pushDirs?: Set<string>;
+}
 
 const RESERVED = new Set([
   "if",
@@ -87,27 +126,6 @@ const RESERVED = new Set([
   "builtin",
 ]);
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "su"]);
-const INTERPRETERS = new Set([
-  "python",
-  "python2",
-  "python3",
-  "node",
-  "nodejs",
-  "deno",
-  "bun",
-  "perl",
-  "ruby",
-  "php",
-  "lua",
-  "xargs",
-  "watch",
-  "ssh",
-  "find",
-  "nsenter",
-  "chroot",
-  "busybox",
-]);
-
 const SYSTEMCTL_DENY = new Set([
   "start",
   "stop",
@@ -246,9 +264,22 @@ const DOCKER_GROUP_DENY: Record<string, ReadonlySet<string>> = {
   swarm: new Set(["init", "join", "leave"]),
 };
 
+const MAX_DEPTH = 3;
+const MAX_CODE = 8 * 1024;
+const MAX_FIND_COMBINATIONS = 200;
+const TOO_LONG = "Befehlstext zu lang für die Sperrlisten-Prüfung; kürzer fassen";
+const REDIRECT_WRITE = "\u0000W";
+const REDIRECT_READ = "\u0000R";
+
+interface Segment {
+  readonly words: string[];
+  /** Targets of `>`, `>>`, `&>`. */
+  readonly writes: string[];
+}
+
 /** Splits a command line into simple commands made of words. Quotes are removed, operators split. */
-function tokenize(line: string): string[][] {
-  const segments: string[][] = [];
+function tokenize(line: string): Segment[] {
+  const segments: Segment[] = [];
   let tokens: string[] = [];
   let word = "";
   let inWord = false;
@@ -260,7 +291,17 @@ function tokenize(line: string): string[][] {
   };
   const endSegment = () => {
     endWord();
-    if (tokens.length > 0) segments.push(tokens);
+    const words: string[] = [];
+    const writes: string[] = [];
+    for (let k = 0; k < tokens.length; k += 1) {
+      const token = tokens[k]!;
+      if (token === REDIRECT_WRITE || token === REDIRECT_READ) {
+        const target = tokens[k + 1];
+        if (target !== undefined && token === REDIRECT_WRITE) writes.push(target);
+        k += 1;
+      } else words.push(token);
+    }
+    if (words.length > 0 || writes.length > 0) segments.push({ words, writes });
     tokens = [];
   };
   for (let i = 0; i < line.length; i += 1) {
@@ -289,6 +330,30 @@ function tokenize(line: string): string[][] {
       }
     } else if (ch === " " || ch === "\t") {
       endWord();
+    } else if (ch === ">" || ch === "<" || (ch === "&" && line[i + 1] === ">")) {
+      // A file descriptor number right before the operator belongs to it.
+      if (inWord && /^\d+$/.test(word)) {
+        word = "";
+        inWord = false;
+      } else endWord();
+      let j = ch === "&" ? i + 1 : i;
+      const op = line[j]!;
+      j += 1;
+      if (op === ">") {
+        if (line[j] === ">" || line[j] === "|") j += 1;
+      } else {
+        while (line[j] === "<") j += 1;
+      }
+      let duplicate = false;
+      if (op === ">" && line[j] === "&") {
+        j += 1;
+        if (/[0-9-]/.test(line[j] ?? "")) {
+          duplicate = true;
+          while (/[0-9-]/.test(line[j] ?? "")) j += 1;
+        }
+      }
+      if (!duplicate) tokens.push(op === ">" ? REDIRECT_WRITE : REDIRECT_READ);
+      i = j - 1;
     } else if (";&|\n()`".includes(ch)) {
       endSegment();
     } else {
@@ -324,54 +389,56 @@ function splitHeredocs(command: string): { main: string; bodies: string[] } {
 }
 
 const baseName = (word: string) => word.slice(word.lastIndexOf("/") + 1);
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 /** Drops assignments, reserved words and the wrappers that only start another command. */
 function stripPrefix(tokens: string[]): string[] {
-  let rest = [...tokens];
-  for (;;) {
-    const first = rest[0];
-    if (first === undefined) return rest;
+  let i = 0;
+  const skipOptions = (valued: ReadonlyArray<string>) => {
+    while (i < tokens.length && tokens[i]!.startsWith("-")) {
+      i += valued.includes(tokens[i]!) ? 2 : 1;
+    }
+  };
+  while (i < tokens.length) {
+    const first = tokens[i]!;
     const name = baseName(first);
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(first) || RESERVED.has(first)) {
-      rest = rest.slice(1);
+    if (ASSIGNMENT.test(first) || RESERVED.has(first)) {
+      i += 1;
     } else if (name === "env") {
-      rest = rest.slice(1);
-      while (rest[0] !== undefined) {
-        const w = rest[0];
-        if (w === "-u" || w === "-C" || w === "--chdir" || w === "--unset") rest = rest.slice(2);
-        else if (w.startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) rest = rest.slice(1);
+      i += 1;
+      while (i < tokens.length) {
+        const w = tokens[i]!;
+        if (w === "-u" || w === "-C" || w === "--chdir" || w === "--unset") i += 2;
+        else if (w.startsWith("-") || ASSIGNMENT.test(w)) i += 1;
         else break;
       }
     } else if (name === "nice" || name === "ionice") {
-      rest = rest.slice(1);
-      while (rest[0] !== undefined && rest[0].startsWith("-")) {
-        rest = rest[0] === "-n" || rest[0] === "-c" ? rest.slice(2) : rest.slice(1);
-      }
+      i += 1;
+      skipOptions(["-n", "-c"]);
     } else if (name === "stdbuf") {
-      rest = rest.slice(1);
-      while (rest[0] !== undefined && rest[0].startsWith("-")) rest = rest.slice(1);
+      i += 1;
+      skipOptions([]);
     } else if (name === "timeout") {
-      rest = rest.slice(1);
-      while (rest[0] !== undefined && rest[0].startsWith("-")) {
-        rest = rest[0] === "-k" || rest[0] === "-s" ? rest.slice(2) : rest.slice(1);
-      }
-      rest = rest.slice(1); // duration
+      i += 1;
+      skipOptions(["-k", "-s"]);
+      i += 1;
     } else if (name === "command") {
-      rest = rest.slice(1);
-      while (rest[0] !== undefined && rest[0].startsWith("-")) {
-        if (rest[0] === "-v" || rest[0] === "-V") return [];
-        rest = rest.slice(1);
+      i += 1;
+      while (i < tokens.length && tokens[i]!.startsWith("-")) {
+        if (tokens[i] === "-v" || tokens[i] === "-V") return [];
+        i += 1;
       }
     } else if (name === "exec") {
-      rest = rest.slice(1);
-      while (rest[0] !== undefined && rest[0].startsWith("-")) {
-        rest = rest[0] === "-a" ? rest.slice(2) : rest.slice(1);
-      }
-    } else return rest;
+      i += 1;
+      skipOptions(["-a"]);
+    } else break;
   }
+  return tokens.slice(i);
 }
 
 const FORCE_PUSH_FLAG = /^-[A-Za-z]*f[A-Za-z]*$/;
+const PUSH_MAIN_REASON =
+  "git push auf main oder master ist Sache des Menschen; arbeite auf einem eigenen Branch und eröffne einen PR";
 
 function protectedBranch(refspec: string): boolean {
   const dst = refspec
@@ -382,7 +449,7 @@ function protectedBranch(refspec: string): boolean {
   return dst === "main" || dst === "master";
 }
 
-function checkGitPush(args: string[]): string | null {
+function checkGitPush(args: string[], ctx: DenylistContext): string | null {
   let i = 0;
   const valueOpts = new Set([
     "-C",
@@ -392,11 +459,21 @@ function checkGitPush(args: string[]): string | null {
     "--namespace",
     "--super-prefix",
   ]);
+  let dir = ctx.cwd;
+  let dirKnown = true;
   while (i < args.length && args[i]!.startsWith("-")) {
-    i += valueOpts.has(args[i]!) ? 2 : 1;
+    const opt = args[i]!;
+    if (opt === "-C" && args[i + 1] !== undefined) {
+      const next = args[i + 1]!;
+      dir = next.includes("$") || next.includes("`") ? null : resolveDir(next, dir, ctx.home);
+    } else if (opt === "--git-dir" || opt === "--work-tree" || opt.startsWith("--git-dir=")) {
+      dirKnown = false;
+    }
+    i += valueOpts.has(opt) ? 2 : 1;
   }
   if (args[i] !== "push") return null;
   const positional: string[] = [];
+  let tags = false;
   for (let j = i + 1; j < args.length; j += 1) {
     const a = args[j]!;
     if (a === "--") {
@@ -415,6 +492,7 @@ function checkGitPush(args: string[]): string | null {
     if (!a.startsWith("--") && FORCE_PUSH_FLAG.test(a)) {
       return "git push mit --force, -f oder --force-with-lease überschreibt fremde Stände";
     }
+    if (a === "--tags") tags = true;
     if (
       a === "--repo" ||
       a === "-o" ||
@@ -432,7 +510,14 @@ function checkGitPush(args: string[]): string | null {
     if (spec.startsWith("+")) return "git push mit +Refspec erzwingt den Push";
   }
   for (const spec of positional) {
-    if (protectedBranch(spec)) return "git push auf main oder master ist Sache des Menschen";
+    if (protectedBranch(spec)) return PUSH_MAIN_REASON;
+  }
+  const needsBranch =
+    (positional.length <= 1 && !tags) || positional.slice(1).some((s) => s === "HEAD" || s === "@");
+  if (needsBranch && dirKnown && dir !== null) {
+    ctx.pushDirs?.add(dir);
+    const branch = ctx.branchOf?.(dir);
+    if (branch === "main" || branch === "master") return PUSH_MAIN_REASON;
   }
   return null;
 }
@@ -447,6 +532,22 @@ function checkSystemctl(args: string[]): string | null {
     return SYSTEMCTL_DENY.has(a) ? `systemctl ${a} ändert Dienste` : null;
   }
   return null;
+}
+
+const SERVICE_DENY = new Set([
+  "start",
+  "stop",
+  "restart",
+  "reload",
+  "force-reload",
+  "try-restart",
+  "condrestart",
+]);
+
+function checkService(args: string[]): string | null {
+  const positional = args.filter((a) => !a.startsWith("-"));
+  const verb = positional[1];
+  return verb !== undefined && SERVICE_DENY.has(verb) ? `service ${verb} ändert Dienste` : null;
 }
 
 function checkDocker(command: string, args: string[]): string | null {
@@ -478,30 +579,38 @@ function checkDocker(command: string, args: string[]): string | null {
   return verb !== undefined && COMPOSE_DENY.has(verb) ? reason(`compose ${verb}`) : null;
 }
 
-function resolveTarget(
-  raw: string,
-  ctx: DenylistContext,
-  home: string,
-): { path: string | null; raw: string } {
-  let value = raw;
-  if (value === "~" || value.startsWith("~/")) value = home + value.slice(1);
-  else if (value === "$HOME" || value.startsWith("$HOME/"))
-    value = home + value.slice("$HOME".length);
-  else if (value === "${HOME}" || value.startsWith("${HOME}/"))
-    value = home + value.slice("${HOME}".length);
-  if (value.includes("$") || value.includes("`")) return { path: null, raw };
+function expandHome(raw: string, home: string): string {
+  for (const [prefix, base] of [
+    ["~", home],
+    ["$HOME", home],
+    ["${HOME}", home],
+    ["$TMPDIR", "/tmp"],
+    ["${TMPDIR}", "/tmp"],
+  ] as const) {
+    if (raw === prefix || raw.startsWith(`${prefix}/`)) return base + raw.slice(prefix.length);
+  }
+  return raw;
+}
+
+/** Path for a word. Null when it cannot be checked (variables), "" when relative and the directory is unknown. */
+function resolveTarget(raw: string, ctx: DenylistContext, home: string): string | null {
+  const value = expandHome(raw, home);
+  if (value.includes("$") || value.includes("`")) return null;
   if (NodePath.posix.isAbsolute(value))
-    return { path: NodePath.posix.normalize(value).replace(/(.)\/+$/, "$1"), raw };
-  if (ctx.cwd !== null) return { path: NodePath.posix.resolve(ctx.cwd, value), raw };
-  return { path: value.split("/").includes("..") ? null : "", raw };
+    return NodePath.posix.normalize(value).replace(/(.)\/+$/, "$1");
+  if (ctx.cwd !== null) return NodePath.posix.resolve(ctx.cwd, value);
+  return value.split("/").includes("..") ? null : "";
 }
 
-function insideCwd(path: string, cwd: string): boolean {
-  return path === cwd || path.startsWith(cwd.endsWith("/") ? cwd : `${cwd}/`);
+function resolveDir(raw: string, cwd: string | null, homeOption?: string): string | null {
+  const home = NodePath.posix.normalize(homeOption ?? NodeOS.homedir());
+  const resolved = resolveTarget(raw, { cwd }, home);
+  return resolved && resolved.length <= 1024 ? resolved : null;
 }
 
-function checkRm(args: string[], ctx: DenylistContext): string | null {
-  const home = NodePath.posix.normalize(ctx.home ?? NodeOS.homedir());
+const RM_ROOTS = ["/tmp", "/var/tmp", "/root/.local/state/flightplan/worktrees"];
+
+function checkRm(args: string[], ctx: DenylistContext, home: string): string | null {
   let recursive = false;
   const targets: string[] = [];
   let optionsDone = false;
@@ -511,133 +620,345 @@ function checkRm(args: string[], ctx: DenylistContext): string | null {
     else if (!optionsDone && a.startsWith("-") && a.length > 1) recursive ||= /[rR]/.test(a);
     else targets.push(a);
   }
-  if (!recursive) return null;
-  const cwd =
-    ctx.cwd !== null && NodePath.posix.isAbsolute(ctx.cwd) && ctx.cwd !== "/"
-      ? NodePath.posix.normalize(ctx.cwd)
-      : null;
+  if (!recursive) return writeReason(targets, ctx);
+  const rootCwd = ctx.rootCwd === undefined ? ctx.cwd : ctx.rootCwd;
+  const cwd = rootCwd !== null && rootCwd !== "/" ? NodePath.posix.normalize(rootCwd) : null;
+  const roots = cwd === null ? RM_ROOTS : [cwd, ...RM_ROOTS];
   for (const raw of targets) {
-    const target = resolveTarget(raw, { cwd }, home);
-    if (target.path === null) return `rekursives rm auf einen nicht prüfbaren Pfad (${raw})`;
-    if (target.path === "") continue; // relative path, directory unknown
-    if (target.path === "/" || target.path === home || /^\/\*+$/.test(target.path)) {
+    const path = resolveTarget(raw, ctx, home);
+    if (path === null) return `rekursives rm auf einen nicht prüfbaren Pfad (${raw})`;
+    if (path === "") {
+      return `rekursives rm auf ${raw}, der wirksame Arbeitsordner ist unbekannt`;
+    }
+    if (path === "/" || path === home || /^\/\*+$/.test(path)) {
       return `rekursives rm auf ${raw} löscht den Host oder das Home-Verzeichnis`;
     }
-    const absolute = NodePath.posix.isAbsolute(raw) || raw.startsWith("~") || raw.startsWith("$");
-    if (cwd === null) {
-      if (absolute)
-        return `rekursives rm auf den absoluten Pfad ${raw} (Arbeitsverzeichnis unbekannt)`;
-    } else if (!insideCwd(target.path, cwd)) {
-      return `rekursives rm auf ${raw} außerhalb des Arbeitsverzeichnisses`;
+    if (!roots.some((root) => path.startsWith(root.endsWith("/") ? root : `${root}/`))) {
+      return `rekursives rm auf ${raw} außerhalb des Arbeitsordners (erlaubt: darunter, /tmp, /var/tmp, Flightplan-Worktrees)`;
     }
   }
   return null;
 }
 
-const CORE_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
-  [/(^|[^\w./-])sudo(\s|$|["'])/, "sudo ist nicht erlaubt"],
-  [
-    /\bgit\b[^\n;|&]*\bpush\b[^\n;|&]*(\s--force\b|\s--force-with-lease|\s--mirror\b|\s-[A-Za-z]*f[A-Za-z]*(\s|$|["'])|\s\+\S|\s(\S*:)?(refs\/heads\/)?(main|master)(\s|$|["']))/,
-    "git push mit Force, +Refspec oder auf main/master",
-  ],
-  [
-    /\bsystemctl\b[^\n;|&]*\s(start|stop|restart|reload|enable|disable|mask|unmask|daemon-reload|edit|kill)(\s|$|["'])/,
-    "systemctl ändert Dienste",
-  ],
-  [
-    /\bdocker(-compose)?\b[^\n;|&]*\s(run|exec|rm|rmi|stop|restart|kill|build|pull|up|down)(\s|$|["'])/,
-    "docker ändert Container, Images, Netze oder Volumes",
-  ],
-  [
-    /\bdocker\b[^\n;|&]*\s(network|volume|system)\s+(create|rm|prune|connect|disconnect)\b/,
-    "docker ändert Netze, Volumes oder das System",
-  ],
-  [/\bfp-op\s+doctor\b/, "fp-op doctor ist nicht erlaubt"],
-  [
-    /\brm\s+(-\S+\s+)*(-\S*[rR]\S*|--recursive)\s+(-\S+\s+)*(\/|~|\$HOME|\$\{HOME\})/,
-    "rekursives rm auf einen absoluten Pfad",
-  ],
-];
+const NO_VALUE: ReadonlyArray<string> = [];
 
-function checkCoreText(text: string): string | null {
-  for (const [pattern, reason] of CORE_PATTERNS) {
-    if (pattern.test(text)) return reason;
+/** Non-option words; `valued` options take the next word, `-t` and `--target-directory` are reported. */
+function splitArgs(
+  args: string[],
+  valued: ReadonlyArray<string> = NO_VALUE,
+): { positional: string[]; targetDir: string | null; flags: string[] } {
+  const positional: string[] = [];
+  const flags: string[] = [];
+  let targetDir: string | null = null;
+  let done = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i]!;
+    if (done || !a.startsWith("-") || a === "-") {
+      positional.push(a);
+    } else if (a === "--") {
+      done = true;
+    } else if (a === "-t" || a === "--target-directory") {
+      targetDir = args[i + 1] ?? null;
+      i += 1;
+    } else if (a.startsWith("--target-directory=")) {
+      targetDir = a.slice("--target-directory=".length);
+    } else {
+      flags.push(a);
+      if (valued.includes(a)) i += 1;
+    }
+  }
+  return { positional, targetDir, flags };
+}
+
+function writeReason(paths: ReadonlyArray<string>, ctx: DenylistContext): string | null {
+  for (const raw of paths) {
+    const reason = checkWritePath(raw, ctx);
+    if (reason !== null) return reason;
   }
   return null;
 }
 
-function checkSegment(tokens: string[], ctx: DenylistContext, depth: number): string | null {
-  const words = stripPrefix(tokens);
+const IGNORED_REDIRECTS = /^\/dev\/(null|stderr|stdout|stdin|tty|fd\/\d+)$/;
+
+function checkRedirects(targets: ReadonlyArray<string>, ctx: DenylistContext): string | null {
+  return writeReason(
+    targets.filter((t) => !IGNORED_REDIRECTS.test(t)),
+    ctx,
+  );
+}
+
+const COPY_LIKE = new Set(["cp", "mv", "install", "ln", "rsync"]);
+const ALL_ARGS_WRITERS = new Set([
+  "tee",
+  "touch",
+  "mkdir",
+  "rmdir",
+  "truncate",
+  "unlink",
+  "shred",
+  "chmod",
+  "chown",
+  "chgrp",
+]);
+const VALUED_OPTS: Record<string, ReadonlyArray<string>> = {
+  cp: ["-S", "--suffix"],
+  mv: ["-S", "--suffix"],
+  install: ["-m", "-o", "-g", "-S"],
+  ln: ["-S", "--suffix"],
+  rsync: ["-e", "--rsh", "--exclude", "--include", "--filter", "-f", "--exclude-from"],
+  truncate: ["-s", "--size", "-r", "--reference"],
+  touch: ["-d", "-r", "-t", "--date", "--reference"],
+  mkdir: ["-m", "--mode"],
+};
+
+function checkCopyLike(command: string, args: string[], ctx: DenylistContext): string | null {
+  const { positional, targetDir, flags } = splitArgs(args, VALUED_OPTS[command]);
+  if (command === "install" && flags.some((f) => f === "-d" || f === "--directory")) {
+    return writeReason(positional, ctx);
+  }
+  const remote = (p: string) => /^[^/]*:/.test(p);
+  const sources = targetDir === null ? positional.slice(0, -1) : positional;
+  const target = targetDir ?? positional[positional.length - 1];
+  const paths: string[] = target === undefined || remote(target) ? [] : [target];
+  if (command === "mv") paths.push(...sources.filter((p) => !remote(p)));
+  return writeReason(paths, ctx);
+}
+
+function checkSed(args: string[], ctx: DenylistContext): string | null {
+  const inPlace = args.some((a) => /^-[A-Za-z]*i[A-Za-z.]*$/.test(a) || a.startsWith("--in-place"));
+  if (!inPlace) return null;
+  return writeReason(splitArgs(args, ["-e", "-f", "--expression", "--file"]).positional, ctx);
+}
+
+function checkDd(args: string[], ctx: DenylistContext): string | null {
+  return writeReason(
+    args.filter((a) => a.startsWith("of=")).map((a) => a.slice(3)),
+    ctx,
+  );
+}
+
+function checkFind(args: string[], ctx: DenylistContext, depth: number, home: string) {
+  let i = 0;
+  while (i < args.length && /^-[HLP]$/.test(args[i]!)) i += 1;
+  const paths: string[] = [];
+  while (i < args.length && !args[i]!.startsWith("-") && args[i] !== "(" && args[i] !== "!") {
+    paths.push(args[i]!);
+    i += 1;
+  }
+  if (paths.length === 0) paths.push(".");
+  const expr = args.slice(i);
+  if (expr.includes("-delete")) {
+    for (const p of paths) {
+      const resolved = resolveTarget(p, ctx, home);
+      if (resolved === "/" || resolved === home) return `find -delete auf ${p}`;
+      const reason = checkWritePath(p, ctx);
+      if (reason !== null) return `find -delete: ${reason}`;
+    }
+  }
+  const commands: string[][] = [];
+  for (let j = 0; j < expr.length; j += 1) {
+    if (!["-exec", "-execdir", "-ok", "-okdir"].includes(expr[j]!)) continue;
+    const inner: string[] = [];
+    let k = j + 1;
+    while (k < expr.length && !(expr[k] === ";" || (expr[k] === "+" && expr[k - 1] === "{}"))) {
+      inner.push(expr[k]!);
+      k += 1;
+    }
+    if (inner.length > 0) commands.push(inner);
+    j = k;
+  }
+  if (paths.length * commands.length > MAX_FIND_COMBINATIONS) return TOO_LONG;
+  for (const inner of commands) {
+    for (const p of paths) {
+      const base = p.endsWith("/") ? p : `${p}/`;
+      const substituted = inner.map((w) =>
+        w.includes("{}") ? w.replaceAll("{}", `${base}{}`) : w,
+      );
+      const verdict = checkWords(stripPrefix(substituted), ctx, depth + 1);
+      if (verdict !== null) return verdict;
+    }
+  }
+  return null;
+}
+
+const XARGS_VALUED = ["-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "-i"];
+const SSH_VALUED = [
+  "-p",
+  "-i",
+  "-l",
+  "-o",
+  "-F",
+  "-J",
+  "-L",
+  "-R",
+  "-D",
+  "-b",
+  "-c",
+  "-E",
+  "-e",
+  "-S",
+  "-w",
+];
+
+const CODE_FLAGS: Record<string, RegExp> = {
+  python: /^-[A-Za-z]*c$/,
+  node: /^(-e|-p|-pe|-ep|--eval|--print)$/,
+  perl: /^-[A-Za-z]*[eE]$/,
+  ruby: /^-e$/,
+  php: /^-r$/,
+  lua: /^-e$/,
+};
+
+function interpreterFamily(command: string): string | null {
+  if (/^python[0-9.]*$/.test(command)) return "python";
+  if (command === "node" || command === "nodejs" || command === "bun") return "node";
+  if (command === "perl" || command === "ruby" || command === "php" || command === "lua") {
+    return command;
+  }
+  return null;
+}
+
+/** Code text of an interpreter call, or null when it runs a file or has none. */
+function interpreterCode(family: string, command: string, args: string[]): string | null {
+  if (command === "deno" && args[0] === "eval") return args[1] ?? null;
+  const flag = CODE_FLAGS[family];
+  if (flag === undefined) return null;
+  const at = args.findIndex((a) => flag.test(a));
+  if (at >= 0) return args[at + 1] ?? null;
+  const long = args.find((a) => a.startsWith("--eval=") || a.startsWith("--print="));
+  return long === undefined ? null : long.slice(long.indexOf("=") + 1);
+}
+
+const SCAN_COMMANDS = new Set([
+  "sudo",
+  "doas",
+  "git",
+  "systemctl",
+  "service",
+  "docker",
+  "docker-compose",
+  "fp-op",
+  "rm",
+]);
+
+/** Looks for the core commands as words in code text. Linear, text is capped. */
+function scanCode(text: string, ctx: DenylistContext): string | null {
+  if (text.length > MAX_CODE) return TOO_LONG;
+  for (const part of text.split(/[\n;|&]+/)) {
+    const words = part.split(/[\s"'`(),[\]{}]+/).filter((w) => w.length > 0);
+    for (let k = 0; k < words.length; k += 1) {
+      if (!SCAN_COMMANDS.has(baseName(words[k]!))) continue;
+      const verdict = checkWords(words.slice(k), ctx, MAX_DEPTH);
+      if (verdict !== null) return verdict;
+    }
+  }
+  return null;
+}
+
+function checkWords(words: string[], ctx: DenylistContext, depth: number): string | null {
   const first = words[0];
   if (first === undefined) return null;
   const command = baseName(first);
   const args = words.slice(1);
-  switch (command) {
-    case "sudo":
-    case "doas":
-      return "sudo ist nicht erlaubt";
-    case "git":
-      return checkGitPush(args);
-    case "systemctl":
-      return checkSystemctl(args);
-    case "docker":
-    case "docker-compose":
-      return checkDocker(command, args);
-    case "fp-op":
-      return args.includes("doctor") ? "fp-op doctor ist nicht erlaubt" : null;
-    case "rm":
-      return checkRm(args, ctx);
-    default:
-      break;
+  const home = NodePath.posix.normalize(ctx.home ?? NodeOS.homedir());
+  if (command === "sudo" || command === "doas") return "sudo ist nicht erlaubt";
+  if (command === "git") return checkGitPush(args, ctx);
+  if (command === "systemctl") return checkSystemctl(args);
+  if (command === "service") return checkService(args);
+  if (command === "docker" || command === "docker-compose") return checkDocker(command, args);
+  if (command === "fp-op") {
+    return args.find((a) => !a.startsWith("-")) === "doctor"
+      ? "fp-op doctor ist nicht erlaubt"
+      : null;
   }
-  const isShell = SHELLS.has(command);
-  if (
-    isShell ||
-    command === "eval" ||
-    INTERPRETERS.has(command) ||
-    /^python[0-9.]*$/.test(command)
-  ) {
-    const text = args.join(" ");
-    if (depth < MAX_DEPTH) {
-      let inner: string | null = null;
-      if (command === "eval") inner = text;
-      else if (isShell) {
-        const at = args.findIndex((a) => /^-[A-Za-z]*c[A-Za-z]*$/.test(a));
-        if (at >= 0 && args[at + 1] !== undefined) inner = args[at + 1]!;
-      } else if (command === "xargs") {
-        let i = 0;
-        const valueOpts = new Set(["-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "-i"]);
-        while (i < args.length && args[i]!.startsWith("-")) i += valueOpts.has(args[i]!) ? 2 : 1;
-        inner = args.slice(i).join(" ");
-      }
-      if (inner !== null) {
-        const verdict = checkBash(inner, ctx, depth + 1);
-        if (verdict !== null) return verdict;
-      }
-    }
-    return checkCoreText(text);
+  if (command === "rm") return checkRm(args, ctx, home);
+  if (COPY_LIKE.has(command)) return checkCopyLike(command, args, ctx);
+  if (ALL_ARGS_WRITERS.has(command)) {
+    return writeReason(splitArgs(args, VALUED_OPTS[command]).positional, ctx);
   }
-  return null;
-}
-
-/** Reason for a deny, or null. */
-export function checkBash(command: string, ctx: DenylistContext, depth = 0): string | null {
-  const { main, bodies } = splitHeredocs(command);
-  const segments = tokenize(main);
-  for (const tokens of segments) {
-    const verdict = checkSegment(tokens, ctx, depth);
+  if (command === "sed") return checkSed(args, ctx);
+  if (command === "dd") return checkDd(args, ctx);
+  if (command === "find") return checkFind(args, ctx, depth, home);
+  if (depth >= MAX_DEPTH) return null;
+  if (command === "xargs") {
+    return checkWords(stripPrefix(splitArgsAfterOptions(args, XARGS_VALUED)), ctx, depth + 1);
+  }
+  if (command === "watch") {
+    const inner = splitArgsAfterOptions(args, ["-n", "--interval", "-d"]).join(" ");
+    return inner.length > MAX_CODE ? TOO_LONG : checkBash(inner, ctx, depth + 1);
+  }
+  if (command === "ssh") {
+    const rest = splitArgsAfterOptions(args, SSH_VALUED).slice(1).join(" ");
+    return rest.length > MAX_CODE
+      ? TOO_LONG
+      : checkBash(rest, { ...ctx, cwd: null, rootCwd: null }, depth + 1);
+  }
+  let code: string | null = null;
+  let parse = false;
+  if (command === "eval") {
+    code = args.join(" ");
+    parse = true;
+  } else if (SHELLS.has(command)) {
+    const at = args.findIndex((a) => /^-[A-Za-z]*c[A-Za-z]*$/.test(a));
+    code = at >= 0 ? (args[at + 1] ?? null) : null;
+    parse = true;
+  } else {
+    const family = interpreterFamily(command) ?? (command === "deno" ? "deno" : null);
+    if (family !== null) code = interpreterCode(family, command, args);
+  }
+  if (code === null) return null;
+  if (code.length > MAX_CODE) return TOO_LONG;
+  if (parse) {
+    const verdict = checkBash(code, ctx, depth + 1);
     if (verdict !== null) return verdict;
   }
-  const feedsInterpreter = segments.some((tokens) => {
-    const name = baseName(stripPrefix(tokens)[0] ?? "");
-    return (
-      SHELLS.has(name) || INTERPRETERS.has(name) || /^python[0-9.]*$/.test(name) || name === "eval"
-    );
+  return scanCode(code, ctx);
+}
+
+/** The words after leading options (options in `valued` take one value). */
+function splitArgsAfterOptions(args: string[], valued: ReadonlyArray<string>): string[] {
+  let i = 0;
+  while (i < args.length && args[i]!.startsWith("-")) i += valued.includes(args[i]!) ? 2 : 1;
+  return args.slice(i);
+}
+
+function cdTarget(words: string[], ctx: DenylistContext): string | null | undefined {
+  const name = baseName(words[0] ?? "");
+  if (name === "popd") return null;
+  if (name !== "cd" && name !== "pushd") return undefined;
+  const rest = words.slice(1).filter((w) => w !== "-P" && w !== "-L" && w !== "--");
+  const target = rest[0];
+  if (target === undefined || target === "-" || target.includes("$") || target.includes("`")) {
+    return null;
+  }
+  return resolveDir(target, ctx.cwd, ctx.home);
+}
+
+/** Reason for a deny, or null. The effective directory follows literal `cd` in the chain. */
+export function checkBash(command: string, start: DenylistContext, depth = 0): string | null {
+  const ctx = start.rootCwd === undefined ? { ...start, rootCwd: start.cwd } : start;
+  const { main, bodies } = splitHeredocs(command);
+  const segments = tokenize(main);
+  let cwd = ctx.cwd;
+  for (const segment of segments) {
+    const local = cwd === ctx.cwd ? ctx : { ...ctx, cwd };
+    const redirect = checkRedirects(segment.writes, local);
+    if (redirect !== null) return redirect;
+    const words = stripPrefix(segment.words);
+    const verdict = checkWords(words, local, depth);
+    if (verdict !== null) return verdict;
+    const moved = cdTarget(words, local);
+    if (moved !== undefined) cwd = moved;
+  }
+  const feedsInterpreter = segments.some((segment) => {
+    const name = baseName(stripPrefix(segment.words)[0] ?? "");
+    return SHELLS.has(name) || name === "eval" || interpreterFamily(name) !== null;
   });
   if (feedsInterpreter) {
     for (const body of bodies) {
+      if (body.length > MAX_CODE) return TOO_LONG;
       const verdict =
-        (depth < MAX_DEPTH ? checkBash(body, ctx, depth + 1) : null) ?? checkCoreText(body);
+        (depth < MAX_DEPTH ? checkBash(body, ctx, depth + 1) : null) ?? scanCode(body, ctx);
       if (verdict !== null) return verdict;
     }
   }
@@ -662,9 +983,8 @@ function under(path: string, root: string): boolean {
 
 export function checkWritePath(rawPath: string, ctx: DenylistContext): string | null {
   const home = NodePath.posix.normalize(ctx.home ?? NodeOS.homedir());
-  const target = resolveTarget(rawPath, ctx, home);
-  const path =
-    target.path === null || target.path === "" ? NodePath.posix.normalize(rawPath) : target.path;
+  const resolved = resolveTarget(rawPath, ctx, home);
+  const path = resolved === null || resolved === "" ? NodePath.posix.normalize(rawPath) : resolved;
   const protectedRoots = [
     ...PROTECTED_ROOTS,
     ...PROTECTED_HOME_DIRS.map((dir) => `${home}/${dir}`),
@@ -703,24 +1023,61 @@ export function checkToolCall(
   return null;
 }
 
+function readBranch(dir: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    NodeChildProcess.execFile(
+      "git",
+      ["-C", dir, "symbolic-ref", "--short", "-q", "HEAD"],
+      { timeout: 2_000, windowsHide: true },
+      (error, stdout) => resolve(error === null ? stdout.trim() || null : null),
+    );
+  });
+}
+
+/**
+ * Checks a tool call. A bare push needs the branch: the first pass collects the directories, the branches are
+ * read once, the second pass decides. Unknown branch means free.
+ */
+export async function checkToolCallWithBranches(
+  toolName: string,
+  toolInput: unknown,
+  ctx: DenylistContext,
+  lookup: (dir: string) => Promise<string | null> = readBranch,
+): Promise<string | null> {
+  const pushDirs = new Set<string>();
+  const first = checkToolCall(toolName, toolInput, { ...ctx, pushDirs });
+  if (first !== null || pushDirs.size === 0) return first;
+  const branches = new Map<string, string | null>();
+  await Promise.all([...pushDirs].map(async (dir) => branches.set(dir, await lookup(dir))));
+  return checkToolCall(toolName, toolInput, { ...ctx, branchOf: (dir) => branches.get(dir) });
+}
+
 /** The `PreToolUse` hook for the SDK `hooks` option. The hook input carries the session directory. */
-export function makeDenylistPreToolUseHook(fallbackCwd: string | null): HookCallback {
-  return (input) => {
-    if (input.hook_event_name !== "PreToolUse") return Promise.resolve({});
+export function makeDenylistPreToolUseHook(
+  fallbackCwd: string | null,
+  lookup?: (dir: string) => Promise<string | null>,
+): HookCallback {
+  return async (input) => {
+    if (input.hook_event_name !== "PreToolUse") return {};
     let reason: string | null;
     try {
-      reason = checkToolCall(input.tool_name, input.tool_input, { cwd: input.cwd || fallbackCwd });
+      reason = await checkToolCallWithBranches(
+        input.tool_name,
+        input.tool_input,
+        { cwd: input.cwd || fallbackCwd },
+        lookup,
+      );
     } catch {
       // A check that fails must not let the call through.
       reason = "die Prüfung des Aufrufs ist fehlgeschlagen";
     }
-    if (reason === null) return Promise.resolve({});
-    return Promise.resolve({
+    if (reason === null) return {};
+    return {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
         permissionDecisionReason: denyMessage(reason),
       },
-    });
+    };
   };
 }

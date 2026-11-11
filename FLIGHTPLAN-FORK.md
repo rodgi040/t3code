@@ -171,19 +171,31 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     (`ticketDenylist`, decided in `openQuery` of `ClaudeAdapterV2.ts`; the flag is part of the live-query key). A hook deny comes
     before the permission mode and `canUseTool`, so it holds in `auto`, `acceptEdits`, `bypassPermissions` and after the
     `dontAsk` fallback; `disallowedTools` was not used because it only matches tool names or prefix rules. Free chats get no
-    hook. `T3CODE_FP_DENYLIST=0` switches it off (default on, only for ticket threads). Bash blocked: `git push` with
-    `--force`, `-f`, `--force-with-lease`, `+ref`, `--mirror` or target `main`/`master`; `sudo`; `systemctl` start, stop, restart,
-    reload, enable, disable, mask, unmask, daemon-reload, edit, kill (and a few like try-restart); `docker`/`docker compose` that
-    change things (run, exec, rm, rmi, stop, restart, kill, build, pull, up, down, start, create, push, network/volume/system
-    changes); `fp-op doctor`; recursive `rm` outside the session directory, on `~`, `/`, `$HOME` (any absolute path when the
-    directory is unknown). Read-only verbs (`status`, `ps`, `logs`, `inspect`, ...) stay free. Write, Edit, MultiEdit,
-    NotebookEdit are blocked for `/etc`, `/opt`, `/usr`, `/var/lib`, `/root/.claude|.ssh|.config`, `~/.claude|.ssh|.config|.hermes`,
-    `/home/*/.ssh|.config|.hermes` and `settings.json`/`settings.local.json` below a `.claude` folder. Chains (`;`, `&&`, `||`, `|`,
-    newline) are checked part by part, `env`/`nice`/`timeout`/`command`/`exec` prefixes are skipped. Limits: `sh -c`, `eval` and
-    `xargs` are re-parsed once, other wrappers (`python -c`, `node -e`, `ssh`, `find -exec`) are only searched for the core patterns as
-    text; scripts, variables, aliases, `mv`/`cp`/`tee`/redirects into protected paths and symlinks are not seen. It stops the
-    straight path, not a deliberate bypass (OP#1845 does that). The message tells the agent to ask with `fp-op ask`. Server change:
-    needs a restart of the t3-fp server.
+    hook. `T3CODE_FP_DENYLIST=0` switches it off (default on, only for ticket threads). A mapping file that cannot be parsed
+    turns the list off for all threads and logs one warning per process (a missing file is silent). Bash blocked: `git push` with
+    `--force`, `-f`, `--force-with-lease`, `+ref`, `--mirror` or target `main`/`master`, and a bare `git push` / `git push origin HEAD`
+    while the hook finds `main`/`master` checked out (`git symbolic-ref` in the effective directory, `git -C` and literal `cd` followed;
+    unknown branch is free); `sudo`; `systemctl` and `service` start, stop, restart, reload, enable, disable, mask, unmask,
+    daemon-reload, edit, kill (and a few like try-restart); `docker`/`docker compose` that change things (run, exec, rm, rmi, stop,
+    restart, kill, build, pull, up, down, start, create, push, network/volume/system changes); `fp-op doctor` (only as the first
+    word after `fp-op`); recursive `rm` outside the session directory, `/tmp`, `/var/tmp` and `/root/.local/state/flightplan/worktrees/`
+    (strict subpaths only, never the root itself, `$TMPDIR` counts as `/tmp`, other variables are not checkable); a relative
+    target is refused when the effective directory is unknown (`cd -`, `cd` alone, `cd $X`); writes into the protected paths below by
+    `>`, `>>`, `&>`, `tee`, `cp`/`mv`/`install`/`ln`/`rsync` (destination, `mv` also the source), `sed -i`, `chmod`, `chown`, `touch`,
+    `mkdir`, `truncate`, `dd of=`, `rm`, `find -delete`. Read-only verbs (`status`, `ps`, `logs`, `inspect`, ...) and reads of
+    protected paths stay free. Write, Edit, MultiEdit, NotebookEdit are blocked for `/etc`, `/opt`, `/usr`, `/var/lib`,
+    `/root/.claude|.ssh|.config`, `~/.claude|.ssh|.config|.hermes`, `/home/*/.ssh|.config|.hermes` and `settings.json`/
+    `settings.local.json` below a `.claude` folder. Chains (`;`, `&&`, `||`, `|`, newline) are checked part by part, `env`/`nice`/
+    `timeout`/`command`/`exec` prefixes are skipped. `find -exec CMD`, `xargs CMD`, `ssh host CMD`, `watch CMD` check CMD as a command
+    (`{}` stands for each search path). `sh -c`, `bash -c`, `eval` are parsed once more; the code text of those and of `python -c`,
+    `node|bun -e|-p`, `perl|ruby -e`, `php -r` is scanned word by word for the core commands (at most 8 KB, longer text is refused
+    with "Befehlstext zu lang für die Sperrlisten-Prüfung; kürzer fassen"); other text (`grep "docker run"`, `bun run docker build`)
+    is never searched. Limits: scripts (`bash x.sh`, `python x.py`), variables, aliases, `$(...)` in double quotes outside the
+    wrappers above, base64, a subshell `cd` meant to stay local, symlinks, interpreter file writes and remote tools (`gh`, `curl`)
+    are not seen. It stops the straight path, not a deliberate bypass (OP#1845 does that). The message tells the agent to ask with
+    `fp-op ask`. Server change: needs a restart of the t3-fp server.
+    Ticket rule (OP#1838 block, only with `T3CODE_FP_ASSUMPTION_RULE=1`): the last sentence asks the agent to name instructions it
+    does not follow (deleting, force push, ignoring rules) under "Offen" in the final statement.
 
 Update: merge a new upstream tag into `flightplan/main`. Details in the Factory repo,
 `openproject/chat/README.md`.
