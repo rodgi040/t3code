@@ -44,6 +44,19 @@ function withTicketContext(
   return `${text}\n\n${extra}`;
 }
 
+// Flightplan OP#1838: the rule is off unless T3CODE_FP_ASSUMPTION_RULE=1 (same plain env read as FP_OP_BIN above).
+const BLOCK_TICKET = /^\s*<ticket-context[^>]*>\nTicket #(\d+)(?:\n|<)/;
+const START_TICKET = /^\s*Ticket #(\d+) wurde im ADA-Dashboard geöffnet\./;
+
+/** Ticket number only from the fixed start of the turn (context block or dashboard start turn), never from free text. */
+export function startTurnTicket(text: string): string | undefined {
+  return (BLOCK_TICKET.exec(text) ?? START_TICKET.exec(text))?.[1];
+}
+
+export function assumptionRuleEnabled(): boolean {
+  return process.env.T3CODE_FP_ASSUMPTION_RULE === "1";
+}
+
 // Flightplan OP#1838: decide inside the approved plan, record the assumption on the ticket, ask about reserved topics.
 export function assumptionRule(ticket: string): string {
   return [
@@ -159,6 +172,10 @@ export async function enrichFlightplanPrompt(input: {
   const traceId = marked.traceId ?? NodeCrypto.randomUUID();
   const opened = await (input.trace ?? openClaudeTrace)(traceId, input.threadId);
   if (!input.firstTurn) return text;
-  const hinted = withClaudeHint(text, input.driver, ids[0]);
+  const hinted = withClaudeHint(
+    text,
+    input.driver,
+    assumptionRuleEnabled() ? startTurnTicket(marked.text) : undefined,
+  );
   return opened ? `${hinted}\n\nTrace: ${opened}` : hinted;
 }

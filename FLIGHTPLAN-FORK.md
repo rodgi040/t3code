@@ -77,7 +77,9 @@ Branch `flightplan/main`, based on the upstream tag `v0.1.6`. Upstream is MIT li
     `fp-op assume <ticket> --text "..."` (one open assumption at most, Exit 2 means ask instead), work only in the own
     branch and do not merge while one is open, always ask about the reserved topics (deploy, host, secrets, deleting,
     money, customers, scope, architecture, reviewer findings, skipping a gate), finish with `fp-op result <ticket>
-    --stdin`. The ticket is the first `#<id>` of the message; without one no rule is added. Autostart is unchanged.
+    --stdin`. The rule is off unless `T3CODE_FP_ASSUMPTION_RULE=1`; without it the prompt is exactly as before. The ticket number
+    comes only from the fixed start of the turn (the `<ticket-context>` block's `Ticket #N` line or a start turn
+    `Ticket #N wurde im ADA-Dashboard geöffnet.`), never from a `#<id>` elsewhere; otherwise no rule. Autostart is unchanged.
 15. Agent activity per ticket (OP#1802): `FlightplanActivity` (rendered from `AppSidebarLayout`, full layout only) posts
     `{type:"fp:activity"}` with the tickets whose thread has a turn in flight to `http://localhost:8090`, on change and
     every 30 s. A turn that waits for an approval or an answer does not count. The dashboard shows "Agent arbeitet" in

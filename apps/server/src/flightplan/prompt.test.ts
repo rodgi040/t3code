@@ -60,40 +60,79 @@ describe("flightplan prompt", () => {
   });
 
   // OP#1838
-  it("adds the assumption rule with the ticket number, only with the first turn", async () => {
-    const args = {
-      driver: "claudeAgent",
-      run: async (id: string) => ({ id, ok: true, body: "x" }),
-      trace: async (id: string) => id,
+  describe("assumption rule", () => {
+    const block = (id: number) =>
+      `<ticket-context source="openproject" trust="untrusted-data">\nTicket #${id}\nTitel: x\n</ticket-context>\nHinweis\n\n`;
+    const run = (text: string, firstTurn = true, driver = "claudeAgent") =>
+      enrichFlightplanPrompt({
+        text,
+        driver,
+        firstTurn,
+        run: async (id) => ({ id, ok: true, body: "x" }),
+        trace: async () => null,
+      });
+    const withSwitch = async (value: string | undefined, fn: () => Promise<void>) => {
+      const old = process.env.T3CODE_FP_ASSUMPTION_RULE;
+      if (value === undefined) delete process.env.T3CODE_FP_ASSUMPTION_RULE;
+      else process.env.T3CODE_FP_ASSUMPTION_RULE = value;
+      try {
+        await fn();
+      } finally {
+        if (old === undefined) delete process.env.T3CODE_FP_ASSUMPTION_RULE;
+        else process.env.T3CODE_FP_ASSUMPTION_RULE = old;
+      }
     };
-    const first = await enrichFlightplanPrompt({ ...args, text: "Arbeite an #1838", firstTurn: true });
-    expect(first).toContain("fp-op assume 1838 --text");
-    expect(first).toContain("fp-op result 1838 --stdin");
-    expect(first).toContain("Es darf nur eine Annahme offen sein");
-    expect(first).toContain("merge nicht");
-    for (const topic of [
-      "Deploy, Release, Einspielen",
-      "Host, Docker, Firewall, SSH, Ports, DNS",
-      "Secrets und Rotation",
-      "Löschen und alles Unumkehrbare",
-      "Geld, Budget, Modellwahl",
-      "Kunden, Versand, Verträge",
-      "Scope und Priorität",
-      "Architektur und Zuständigkeit",
-      "Prüfer-Befunde",
-      "Überspringen eines Gates",
-    ]) {
-      expect(first).toContain(topic);
-    }
-    const later = await enrichFlightplanPrompt({ ...args, text: "Weiter mit #1838", firstTurn: false });
-    expect(later).not.toContain("fp-op assume");
-    const other = await enrichFlightplanPrompt({
-      ...args,
-      driver: "acpRegistry",
-      text: "Arbeite an #1838",
-      firstTurn: true,
+
+    it("leaves the prompt unchanged when the switch is off", async () => {
+      await withSwitch(undefined, async () => {
+        expect(await run(block(1838) + "Los")).not.toContain("fp-op assume");
+      });
+      await withSwitch("0", async () => {
+        expect(await run(block(1838) + "Los")).not.toContain("fp-op assume");
+      });
     });
-    expect(other).not.toContain("fp-op assume");
+
+    it("adds the rule with the block's ticket number and all reserved topics", async () => {
+      await withSwitch("1", async () => {
+        const first = await run(block(1838) + "Los");
+        expect(first).toContain("fp-op assume 1838 --text");
+        expect(first).toContain("fp-op result 1838 --stdin");
+        expect(first).toContain("Es darf nur eine Annahme offen sein");
+        expect(first).toContain("merge nicht");
+        for (const topic of [
+          "Deploy, Release, Einspielen",
+          "Host, Docker, Firewall, SSH, Ports, DNS",
+          "Secrets und Rotation",
+          "Löschen und alles Unumkehrbare",
+          "Geld, Budget, Modellwahl",
+          "Kunden, Versand, Verträge",
+          "Scope und Priorität",
+          "Architektur und Zuständigkeit",
+          "Prüfer-Befunde",
+          "Überspringen eines Gates",
+        ]) {
+          expect(first).toContain(topic);
+        }
+      });
+    });
+
+    it("takes the number from the dashboard start turn", async () => {
+      await withSwitch("1", async () => {
+        const out = await run("Ticket #77 wurde im ADA-Dashboard geöffnet.\nFasse zusammen.");
+        expect(out).toContain("fp-op assume 77 --text");
+      });
+    });
+
+    it("adds no rule without a fixed start, on later turns or other drivers", async () => {
+      await withSwitch("1", async () => {
+        expect(await run("Was ist mit #5?")).not.toContain("fp-op assume");
+        expect(await run("Nimm Variante #2")).not.toContain("fp-op assume");
+        // Text before the block: the block parser (anchored at the start) does not accept it, so neither do we.
+        expect(await run("Siehe #123\n\n" + block(9) + "Los")).not.toContain("fp-op assume");
+        expect(await run(block(1838) + "Weiter", false)).not.toContain("fp-op assume");
+        expect(await run(block(1838) + "Los", true, "acpRegistry")).not.toContain("fp-op assume");
+      });
+    });
   });
 
   it("passes slash commands through unchanged, on any turn", async () => {
