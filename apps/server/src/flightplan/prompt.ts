@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - plain synchronous Node file code outside the Effect runtime (Flightplan module).
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
@@ -91,6 +92,7 @@ function runFpOp(id: string): Promise<{ id: string; ok: boolean; body: string }>
       stdio: ["ignore", "pipe", "ignore"],
     });
     let out = "";
+    // @effect-diagnostics-next-line globalTimers:off - plain Promise code outside the Effect runtime; kills a hung child
     const timer = setTimeout(() => child.kill(), 15_000);
     child.stdout.on("data", (chunk: Buffer) => {
       out += chunk.toString("utf8");
@@ -209,6 +211,7 @@ export async function sendTurnSpan(
     ...(ticket ? { ticket } : {}),
   });
   try {
+    // @effect-diagnostics-next-line globalFetch:off - plain Promise code outside the Effect runtime; best-effort Langfuse export
     const response = await fetch(`${host.replace(/\/$/, "")}/api/public/otel/v1/traces`, {
       method: "POST",
       headers: {

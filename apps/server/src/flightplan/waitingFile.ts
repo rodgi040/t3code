@@ -3,6 +3,7 @@
  * (approval, input, error), derived from the server's own thread shells with the web client's rules. Read-only
  * information; `T3CODE_FP_WAITING_FILE=0` switches it off.
  */
+// @effect-diagnostics nodeBuiltinImport:off - the file is written with plain synchronous node:fs calls (small local state file).
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
@@ -15,6 +16,7 @@ import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 
+import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
 import { forkParked } from "../serverActivation.ts";
 import { readTicketThreadMap, ticketThreadFile } from "./ticketThreads.ts";
 
@@ -155,8 +157,11 @@ export interface WaitingFileSource {
   readonly getShellSnapshot: (options: {
     readonly location: "active";
     readonly threadIds: ReadonlyArray<ThreadId>;
-  }) => Effect.Effect<{ readonly threads: ReadonlyArray<OrchestrationV2ThreadShell> }, unknown>;
-  readonly streamDomainEvents: Stream.Stream<unknown, unknown>;
+  }) => Effect.Effect<
+    { readonly threads: ReadonlyArray<OrchestrationV2ThreadShell> },
+    OrchestratorV2Error
+  >;
+  readonly streamDomainEvents: Stream.Stream<unknown, OrchestratorV2Error>;
 }
 
 /**
@@ -190,9 +195,11 @@ export const startWaitingFile = (input: {
               threadIds: threadIds as ThreadId[],
             });
       const waiting = collectWaitingThreads(ticketThreads, snapshot.threads);
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - change-detection key of a plain object; never decoded
       const key = JSON.stringify(waiting);
       const nowMs = yield* Clock.currentTimeMillis;
       if (key === lastKey && nowMs - lastWriteMs < heartbeat) return;
+      // @effect-diagnostics-next-line globalDateInEffect:off - Date built from Clock.currentTimeMillis, renderWaitingFile takes a Date
       writeWaitingFile(file, renderWaitingFile(waiting, new Date(nowMs)));
       lastKey = key;
       lastWriteMs = nowMs;
